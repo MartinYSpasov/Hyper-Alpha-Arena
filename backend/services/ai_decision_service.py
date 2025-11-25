@@ -569,6 +569,10 @@ def _build_prompt_context(
                 liquidation_px = float(pos.get('liquidation_px', 0))
                 leverage_type = pos.get('leverage_type', 'cross') or 'cross'
 
+                # Position timing information (NEW)
+                opened_at_str = pos.get('opened_at_str')
+                holding_duration_str = pos.get('holding_duration_str')
+
                 # Get current market price for this symbol
                 current_price = prices.get(symbol, entry_px)
 
@@ -586,8 +590,14 @@ def _build_prompt_context(
                     liq_distance_pct = 0
                     liq_warning = ""
 
+                # Build position timing line
+                timing_line = ""
+                if opened_at_str and holding_duration_str:
+                    timing_line = f"  Opened: {opened_at_str} | Holding: {holding_duration_str}\n"
+
                 pos_lines.append(
                     f"- {symbol}: {direction} {abs_size:.4f} units @ ${entry_px:,.2f} avg\n"
+                    f"{timing_line}"
                     f"  Mark price: ${current_price:,.2f} | Position value: ${position_value:,.2f}\n"
                     f"  Unrealized P&L: {pnl_str} ({roe_str} ROE)\n"
                     f"  Leverage: {leverage:.0f}x {leverage_type_str} (max {max_leverage:.0f}x) | Margin: ${margin_used:,.2f}\n"
@@ -603,6 +613,62 @@ def _build_prompt_context(
         margin_usage_percent = "0"
         maintenance_margin = "N/A"
         positions_detail = "No open positions"
+
+    # ============================================================================
+    # RECENT TRADES HISTORY SUMMARY
+    # ============================================================================
+    # Build recent closed trades summary to help AI understand trading patterns
+    # and avoid flip-flop behavior (rapid position reversals)
+    recent_trades_summary = "No recent trade history available"
+    if hyperliquid_state and environment in ("testnet", "mainnet"):
+        try:
+            # Get trading client to fetch recent closed trades
+            from services.hyperliquid_trading_client import HyperliquidTradingClient
+            from database.connection import SessionLocal
+
+            # Get account's Hyperliquid wallet configuration
+            with SessionLocal() as db_session:
+                from database.models import HyperliquidWallet
+                wallet = db_session.query(HyperliquidWallet).filter(
+                    HyperliquidWallet.account_id == account.id,
+                    HyperliquidWallet.environment == environment,
+                    HyperliquidWallet.is_active == True
+                ).first()
+
+                if wallet:
+                    # Initialize trading client
+                    client = HyperliquidTradingClient(
+                        account_id=account.id,
+                        private_key=wallet.private_key,
+                        environment=environment,
+                        wallet_address=wallet.wallet_address
+                    )
+
+                    # Get recent closed trades (last 5)
+                    recent_trades = client.get_recent_closed_trades(db_session, limit=5)
+
+                    if recent_trades:
+                        trade_lines = []
+                        for trade in recent_trades:
+                            symbol = trade.get('symbol', 'UNKNOWN')
+                            side = trade.get('side', 'Unknown')
+                            close_time = trade.get('close_time', 'N/A')
+                            close_price = trade.get('close_price', 0)
+                            realized_pnl = trade.get('realized_pnl', 0)
+                            direction = trade.get('direction', '')
+
+                            pnl_str = f"+${realized_pnl:,.2f}" if realized_pnl >= 0 else f"-${abs(realized_pnl):,.2f}"
+                            trade_lines.append(
+                                f"- {symbol} {side}: Closed at {close_time} @ ${close_price:,.2f} | P&L: {pnl_str} | {direction}"
+                            )
+                        recent_trades_summary = "\n".join(trade_lines)
+                    else:
+                        recent_trades_summary = "No recent closed trades found"
+                else:
+                    recent_trades_summary = "Wallet not configured for this environment"
+        except Exception as e:
+            logger.warning(f"Failed to get recent trades summary: {e}", exc_info=True)
+            recent_trades_summary = f"Error fetching trade history: {str(e)[:100]}"
 
     # ============================================================================
     # K-LINE AND TECHNICAL INDICATORS PROCESSING
@@ -668,6 +734,8 @@ def _build_prompt_context(
         "margin_usage_percent": margin_usage_percent,
         "maintenance_margin": maintenance_margin,
         "positions_detail": positions_detail,
+        # Recent trades history (NEW - helps AI understand trading patterns)
+        "recent_trades_summary": recent_trades_summary,
         # K-line and technical indicator variables (dynamically generated)
         **kline_context,  # Merge K-line/indicator variables like {BTC_klines_15m}, {BTC_MACD_15m}, etc.
     }
