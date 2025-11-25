@@ -72,10 +72,18 @@ def setup_hyperliquid_account(
         account.hyperliquid_mainnet_private_key = encrypted_key
 
     # Configure account
-    account.hyperliquid_environment = environment
+    # IMPORTANT: Account environment MUST sync with global trading mode
+    global_mode = get_global_trading_mode(db)
+    account.hyperliquid_environment = global_mode
     account.hyperliquid_enabled = "true"
     account.max_leverage = max_leverage
     account.default_leverage = default_leverage
+
+    if global_mode != environment:
+        logger.warning(
+            f"Account environment set to global mode '{global_mode}' instead of requested '{environment}'. "
+            f"Credentials stored for '{environment}' but will use global mode."
+        )
 
     try:
         db.commit()
@@ -301,15 +309,35 @@ def switch_hyperliquid_environment(
                 "Please setup mainnet credentials first using setup_hyperliquid_account()."
             )
 
-    # Perform switch
-    old_env = account.hyperliquid_environment
-    account.hyperliquid_environment = target_environment
+    # IMPORTANT: Switch GLOBAL trading mode, not per-account
+    # Update system config
+    config = db.query(SystemConfig).filter(
+        SystemConfig.key == "hyperliquid_trading_mode"
+    ).first()
+
+    if not config:
+        config = SystemConfig(key="hyperliquid_trading_mode", value=target_environment)
+        db.add(config)
+    else:
+        old_global_mode = config.value
+        config.value = target_environment
+        logger.info(f"Switching GLOBAL trading mode from {old_global_mode} to {target_environment}")
+
+    # Sync ALL Hyperliquid-enabled accounts to new global mode
+    all_hl_accounts = db.query(Account).filter(
+        Account.hyperliquid_enabled == "true"
+    ).all()
+
+    synced_count = 0
+    for acc in all_hl_accounts:
+        acc.hyperliquid_environment = target_environment
+        synced_count += 1
 
     try:
         db.commit()
         logger.warning(
-            f"ENVIRONMENT SWITCH: Account {account.name} (ID: {account_id}) "
-            f"switched from {old_env} to {target_environment.upper()}"
+            f"GLOBAL ENVIRONMENT SWITCH: Trading mode changed to {target_environment.upper()}. "
+            f"Synced {synced_count} Hyperliquid accounts."
         )
     except Exception as e:
         db.rollback()

@@ -429,8 +429,8 @@ class HyperliquidTradingClient:
                 holding_duration_seconds = None
                 holding_duration_str = None
 
-                if user_fills and coin:
-                    opened_at = self._calculate_position_opened_time(coin, user_fills)
+                if user_fills and coin and abs(position_size) > 1e-8:
+                    opened_at = self._calculate_position_opened_time(coin, position_size, user_fills)
                     if opened_at:
                         from datetime import datetime
                         import time as time_module
@@ -633,23 +633,24 @@ class HyperliquidTradingClient:
             logger.error(f"Failed to get historical orders: {e}", exc_info=True)
             raise
 
-    def _calculate_position_opened_time(self, symbol: str, fills: List[Dict[str, Any]]) -> Optional[int]:
+    def _calculate_position_opened_time(self, symbol: str, current_position_size: float, fills: List[Dict[str, Any]]) -> Optional[int]:
         """
         Calculate when a position was opened based on user fills
 
-        This method finds the EARLIEST fill that contributed to building
-        the current position by walking backwards through fills and tracking
-        position accumulation.
+        This method walks backwards through fills starting from the current position,
+        subtracting each fill's effect until we reach the point where the position
+        was first opened (when going back further would cross zero or change direction).
 
         Args:
             symbol: Asset symbol (e.g., "BTC")
+            current_position_size: Current position size (signed: positive=long, negative=short)
             fills: List of all user fills (from _get_user_fills)
 
         Returns:
             Timestamp in milliseconds when position was first opened,
             or None if no fills found for this symbol
         """
-        if not fills:
+        if not fills or abs(current_position_size) < 1e-8:
             return None
 
         # Filter fills for this symbol and sort by time (newest first)
@@ -659,28 +660,38 @@ class HyperliquidTradingClient:
         if not symbol_fills:
             return None
 
-        # Walk backwards through fills to find where position started
-        # We track cumulative position to detect when it crossed zero (direction change)
-        cumulative_position = 0.0
+        # Start from current position and walk backwards
+        # Subtract each fill's effect to find when position started
+        position_tracker = current_position_size
         earliest_time = None
 
         for fill in symbol_fills:
             sz = float(fill.get('sz', 0))
             side = fill.get('side', '')
 
-            # side "B" = buy (positive), "A" = sell (negative)
+            # Calculate what the position was BEFORE this fill
+            # side "B" = buy (adds to position), "A" = sell (reduces position)
             if side == "B":
-                cumulative_position += sz
+                position_before = position_tracker - sz
             elif side == "A":
-                cumulative_position -= sz
+                position_before = position_tracker + sz
+            else:
+                continue
 
-            # If we're still building the same direction, this is part of current position
-            earliest_time = fill.get('time')
-
-            # If cumulative crosses zero, we've gone back past the start of this position
-            # (previous position was in opposite direction)
-            if abs(cumulative_position) < 1e-8:  # Close to zero
+            # Check if going back past this fill would cross zero or change direction
+            # If so, this fill is where the current position started
+            if abs(position_before) < 1e-8:
+                # Position was zero before this fill - this is the opening fill
+                earliest_time = fill.get('time')
                 break
+            elif (position_tracker > 0 and position_before < 0) or (position_tracker < 0 and position_before > 0):
+                # Position changed direction - this fill opened the current position
+                earliest_time = fill.get('time')
+                break
+            else:
+                # This fill is part of the current position, keep going back
+                earliest_time = fill.get('time')
+                position_tracker = position_before
 
         return earliest_time
 

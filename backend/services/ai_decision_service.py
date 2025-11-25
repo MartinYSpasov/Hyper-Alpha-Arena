@@ -632,7 +632,7 @@ def _build_prompt_context(
                 wallet = db_session.query(HyperliquidWallet).filter(
                     HyperliquidWallet.account_id == account.id,
                     HyperliquidWallet.environment == environment,
-                    HyperliquidWallet.is_active == True
+                    HyperliquidWallet.is_active == "true"
                 ).first()
 
                 if wallet:
