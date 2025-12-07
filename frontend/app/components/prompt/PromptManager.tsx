@@ -770,7 +770,7 @@ export default function PromptManager() {
 
       {/* Variables Reference Modal */}
       <Dialog open={variablesRefModalOpen} onOpenChange={setVariablesRefModalOpen}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+        <DialogContent className="max-w-5xl max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>Strategy Variables Reference</DialogTitle>
             <DialogDescription>
@@ -778,21 +778,24 @@ export default function PromptManager() {
             </DialogDescription>
           </DialogHeader>
 
-          {/* AI Prompt Generation CTA */}
-          <div className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-950/30 dark:to-pink-950/30 border border-purple-200 dark:border-purple-800 rounded-lg p-4 mb-4">
-            <div className="flex items-start gap-3">
-              <div className="text-2xl">✨</div>
-              <div className="flex-1 space-y-2">
-                <p className="text-sm font-medium text-foreground">
-                  If you're unsure how to use these variables or want a more sophisticated trading strategy, try the <span className="font-semibold text-purple-600 dark:text-purple-400">AI Prompt Generation</span> feature (requires Premium).
+          <div className="flex-1 flex gap-4 overflow-hidden">
+            {/* Left Sidebar - AI Prompt CTA */}
+            <div className="w-56 flex-shrink-0">
+              <div className="bg-gradient-to-b from-purple-50 to-pink-50 dark:from-purple-950/30 dark:to-pink-950/30 border border-purple-200 dark:border-purple-800 rounded-lg p-4 h-full flex flex-col">
+                <div className="text-2xl mb-3">✨</div>
+                <p className="text-sm font-medium text-foreground mb-3">
+                  Need help writing prompts?
                 </p>
-                <div className="text-sm text-muted-foreground space-y-1">
-                  <p className="font-medium">The AI assistant will:</p>
-                  <ul className="list-disc list-inside space-y-0.5 ml-2">
-                    <li>Generate optimized prompts based on your trading style</li>
-                    <li>Intelligently select appropriate variables and indicators</li>
-                    <li>Provide professional risk management suggestions</li>
-                    <li>Support multi-turn conversations to refine your strategy</li>
+                <p className="text-xs text-muted-foreground mb-3">
+                  Try <span className="font-semibold text-purple-600 dark:text-purple-400">AI Prompt Generation</span> to create professional trading strategies.
+                </p>
+                <div className="text-xs text-muted-foreground space-y-1 mb-4">
+                  <p className="font-medium">AI will help you:</p>
+                  <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                    <li>Generate optimized prompts</li>
+                    <li>Select appropriate variables</li>
+                    <li>Add risk management</li>
+                    <li>Refine via conversation</li>
                   </ul>
                 </div>
                 <Button
@@ -801,15 +804,18 @@ export default function PromptManager() {
                     setVariablesRefModalOpen(false)
                     handleAiWriteClick()
                   }}
-                  className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white border-0 shadow-md hover:shadow-lg transition-all mt-2"
+                  className="w-full bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white border-0 shadow-md hover:shadow-lg transition-all text-xs"
                 >
-                  ✨ AI Write Strategy Prompt
+                  ✨ Try AI Write
                 </Button>
+                <p className="text-[10px] text-muted-foreground mt-2 text-center">
+                  Premium feature
+                </p>
               </div>
             </div>
-          </div>
 
-          <ScrollArea className="flex-1 pr-4">
+            {/* Right Content - Variables Documentation */}
+            <ScrollArea className="flex-1 pr-4">
             {variablesRefLoading ? (
               <div className="flex items-center justify-center py-8">
                 <span className="text-muted-foreground">Loading...</span>
@@ -854,6 +860,7 @@ export default function PromptManager() {
               </div>
             )}
           </ScrollArea>
+          </div>
           <DialogFooter>
             <Button onClick={() => setVariablesRefModalOpen(false)}>
               Close
