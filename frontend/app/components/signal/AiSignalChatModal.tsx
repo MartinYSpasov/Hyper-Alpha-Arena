@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
+import rehypeRaw from 'rehype-raw'
 import { toast } from 'react-hot-toast'
 import {
   Dialog,
@@ -23,7 +24,9 @@ interface SignalConfig {
   name: string
   symbol: string
   description?: string
-  trigger_condition: {
+  _type?: 'signal' | 'pool'  // Type identifier from backend
+  // For single signal
+  trigger_condition?: {
     metric: string
     operator?: string
     threshold?: number
@@ -32,6 +35,23 @@ interface SignalConfig {
     ratio_threshold?: number
     volume_threshold?: number
   }
+  // For signal pool
+  logic?: 'AND' | 'OR'
+  signals?: Array<{
+    metric: string
+    operator: string
+    threshold: number
+    time_window?: string
+  }>
+}
+
+interface AnalysisEntry {
+  type: 'reasoning' | 'tool_call' | 'tool_result'
+  round?: number
+  content?: string
+  name?: string
+  arguments?: Record<string, unknown>
+  result?: Record<string, unknown>
 }
 
 interface Message {
@@ -39,6 +59,9 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   signal_configs?: SignalConfig[] | null
+  isStreaming?: boolean
+  statusText?: string
+  analysisLog?: AnalysisEntry[]
 }
 
 interface Conversation {
@@ -51,7 +74,8 @@ interface Conversation {
 interface AiSignalChatModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onCreateSignal: (config: SignalConfig) => void
+  onCreateSignal: (config: SignalConfig) => Promise<boolean>  // Returns true on success
+  onCreatePool: (config: SignalConfig) => Promise<boolean>    // Create signal pool
   onPreviewSignal: (config: SignalConfig) => void
   accounts: TradingAccount[]
   accountsLoading: boolean
@@ -62,6 +86,7 @@ export default function AiSignalChatModal({
   open,
   onOpenChange,
   onCreateSignal,
+  onCreatePool,
   onPreviewSignal,
   accounts,
   accountsLoading,
@@ -146,11 +171,20 @@ export default function AiSignalChatModal({
     setUserInput('')
     setLoading(true)
 
-    const tempUserMsg: Message = { id: Date.now(), role: 'user', content: userMessage }
-    setMessages(prev => [...prev, tempUserMsg])
+    const tempUserMsgId = Date.now()
+    const tempAssistantMsgId = tempUserMsgId + 1
+    const tempUserMsg: Message = { id: tempUserMsgId, role: 'user', content: userMessage }
+    const tempAssistantMsg: Message = {
+      id: tempAssistantMsgId,
+      role: 'assistant',
+      content: '',
+      isStreaming: true,
+      statusText: 'Connecting...',
+    }
+    setMessages(prev => [...prev, tempUserMsg, tempAssistantMsg])
 
     try {
-      const response = await fetch('/api/signals/ai-chat', {
+      const response = await fetch('/api/signals/ai-chat-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -161,33 +195,135 @@ export default function AiSignalChatModal({
       })
 
       if (!response.ok) throw new Error('Failed to send message')
-      const data = await response.json()
+      if (!response.body) throw new Error('No response body')
 
-      if (data.success) {
-        if (!currentConversationId && data.conversationId) {
-          setCurrentConversationId(data.conversationId)
-          loadConversations()
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let finalContent = ''
+      let finalSignalConfigs: SignalConfig[] = []
+      let finalConversationId: number | null = null
+      let finalMessageId: number | null = null
+
+      let currentEventType = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEventType = line.slice(7).trim()
+            continue
+          }
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              handleSSEEvent(currentEventType, data, tempAssistantMsgId, (updates) => {
+                if (updates.content !== undefined) finalContent = updates.content
+                if (updates.signalConfigs) finalSignalConfigs = updates.signalConfigs
+                if (updates.conversationId) finalConversationId = updates.conversationId
+                if (updates.messageId) finalMessageId = updates.messageId
+              })
+            } catch {}
+            currentEventType = ''
+          }
         }
-        const assistantMsg: Message = {
-          id: data.messageId,
-          role: 'assistant',
-          content: data.content,
-          signal_configs: data.signalConfigs,
-        }
-        setMessages(prev => [...prev.filter(m => m.id !== tempUserMsg.id), tempUserMsg, assistantMsg])
-        if (data.signalConfigs?.length > 0) {
-          setAllSignalConfigs(prev => [...prev, ...data.signalConfigs])
-        }
-      } else {
-        toast.error(data.error || 'Failed to generate response')
-        setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id))
+      }
+
+      // Finalize the message
+      setMessages(prev => prev.map(m =>
+        m.id === tempAssistantMsgId
+          ? { ...m, content: finalContent, signal_configs: finalSignalConfigs, isStreaming: false, statusText: undefined }
+          : m
+      ))
+      if (finalSignalConfigs.length > 0) {
+        setAllSignalConfigs(prev => [...prev, ...finalSignalConfigs])
+      }
+      if (!currentConversationId && finalConversationId) {
+        setCurrentConversationId(finalConversationId)
+        loadConversations()
       }
     } catch (error) {
       console.error('Error sending message:', error)
       toast.error('Failed to send message')
-      setMessages(prev => prev.filter(m => m.id !== tempUserMsg.id))
+      setMessages(prev => prev.filter(m => m.id !== tempUserMsgId && m.id !== tempAssistantMsgId))
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleSSEEvent = (
+    eventType: string,
+    data: Record<string, unknown>,
+    msgId: number,
+    onUpdate: (updates: { content?: string; signalConfigs?: SignalConfig[]; conversationId?: number; messageId?: number }) => void
+  ) => {
+    if (eventType === 'status') {
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? { ...m, statusText: data.message as string } : m
+      ))
+    } else if (eventType === 'reasoning') {
+      const reasoning = data.content as string || ''
+      const entry: AnalysisEntry = { type: 'reasoning', content: reasoning }
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? {
+          ...m,
+          statusText: `Thinking: ${reasoning.slice(0, 80)}...`,
+          analysisLog: [...(m.analysisLog || []), entry]
+        } : m
+      ))
+    } else if (eventType === 'content') {
+      const content = data.content as string
+      onUpdate({ content })
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? { ...m, content, statusText: undefined } : m
+      ))
+    } else if (eventType === 'signal_config') {
+      const config = data.config as SignalConfig
+      if (config) {
+        onUpdate({ signalConfigs: [config] })
+      }
+    } else if (eventType === 'done') {
+      const content = data.content as string
+      const signalConfigs = data.signal_configs as SignalConfig[]
+      onUpdate({
+        conversationId: data.conversation_id as number,
+        messageId: data.message_id as number,
+        content: content,
+        signalConfigs: signalConfigs,
+      })
+    } else if (eventType === 'error') {
+      toast.error(data.message as string || 'AI generation failed')
+    } else if (eventType === 'tool_call') {
+      const entry: AnalysisEntry = {
+        type: 'tool_call',
+        name: data.name as string,
+        arguments: data.arguments as Record<string, unknown>
+      }
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? {
+          ...m,
+          statusText: `Calling ${data.name}...`,
+          analysisLog: [...(m.analysisLog || []), entry]
+        } : m
+      ))
+    } else if (eventType === 'tool_result') {
+      const entry: AnalysisEntry = {
+        type: 'tool_result',
+        name: data.name as string,
+        result: data.result as Record<string, unknown>
+      }
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? {
+          ...m,
+          statusText: `Got result from ${data.name}`,
+          analysisLog: [...(m.analysisLog || []), entry]
+        } : m
+      ))
     }
   }
 
@@ -298,6 +434,7 @@ export default function AiSignalChatModal({
             configs={allSignalConfigs}
             onPreview={onPreviewSignal}
             onCreate={onCreateSignal}
+            onCreatePool={onCreatePool}
             getMetricLabel={getMetricLabel}
             getOperatorLabel={getOperatorLabel}
           />
@@ -336,11 +473,36 @@ function ChatArea({
               }`}>
                 <div className={`text-xs font-semibold mb-1 ${msg.role === 'user' ? 'text-white/70' : 'opacity-70'}`}>
                   {msg.role === 'user' ? 'You' : 'AI Assistant'}
+                  {msg.isStreaming && msg.statusText && (
+                    <span className="ml-2 text-primary animate-pulse">({msg.statusText})</span>
+                  )}
                 </div>
+                {/* Show analysis log during streaming */}
+                {msg.isStreaming && msg.analysisLog && msg.analysisLog.length > 0 && (
+                  <div className="mb-2 text-xs bg-background/50 rounded p-2 max-h-32 overflow-y-auto">
+                    {msg.analysisLog.slice(-5).map((entry, idx) => (
+                      <div key={idx} className="mb-1 last:mb-0">
+                        {entry.type === 'tool_call' && (
+                          <span className="text-blue-500">→ {entry.name}({Object.entries(entry.arguments || {}).map(([k,v]) => `${k}=${v}`).join(', ')})</span>
+                        )}
+                        {entry.type === 'tool_result' && (
+                          <span className="text-green-500">← {entry.name}: {JSON.stringify(entry.result).slice(0, 80)}...</span>
+                        )}
+                        {entry.type === 'reasoning' && (
+                          <span className="text-gray-500 italic">{(entry.content || '').slice(0, 100)}...</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className={`text-sm prose prose-sm max-w-none ${
                   msg.role === 'user' ? 'prose-invert text-white' : 'dark:prose-invert'
-                }`}>
-                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                } [&_details]:bg-muted/50 [&_details]:rounded-lg [&_details]:p-2 [&_details]:mb-3 [&_details]:text-xs [&_summary]:cursor-pointer [&_summary]:font-medium [&_summary]:text-muted-foreground [&_details>div]:mt-2 [&_details>div]:max-h-64 [&_details>div]:overflow-y-auto [&_details>div]:whitespace-pre-wrap [&_details>div]:text-muted-foreground`}>
+                  {msg.content ? (
+                    <ReactMarkdown rehypePlugins={[rehypeRaw]}>{msg.content}</ReactMarkdown>
+                  ) : msg.isStreaming ? (
+                    <span className="text-muted-foreground italic">Generating...</span>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -375,14 +537,36 @@ function ChatArea({
 
 // Signal Cards Panel Component
 function SignalCardsPanel({
-  configs, onPreview, onCreate, getMetricLabel, getOperatorLabel
+  configs, onPreview, onCreate, onCreatePool, getMetricLabel, getOperatorLabel
 }: {
   configs: SignalConfig[]
   onPreview: (config: SignalConfig) => void
-  onCreate: (config: SignalConfig) => void
+  onCreate: (config: SignalConfig) => Promise<boolean>
+  onCreatePool: (config: SignalConfig) => Promise<boolean>
   getMetricLabel: (m: string) => string
   getOperatorLabel: (o: string) => string
 }) {
+  // Track which signals/pools are being created and which have been created
+  const [creatingSignals, setCreatingSignals] = useState<Set<string>>(new Set())
+  const [createdSignals, setCreatedSignals] = useState<Set<string>>(new Set())
+
+  const handleCreate = async (config: SignalConfig, isPool: boolean) => {
+    const signalKey = config.name || `signal-${configs.indexOf(config)}`
+    setCreatingSignals(prev => new Set(prev).add(signalKey))
+    try {
+      const success = isPool ? await onCreatePool(config) : await onCreate(config)
+      if (success) {
+        setCreatedSignals(prev => new Set(prev).add(signalKey))
+      }
+    } finally {
+      setCreatingSignals(prev => {
+        const next = new Set(prev)
+        next.delete(signalKey)
+        return next
+      })
+    }
+  }
+
   return (
     <div className="w-[55%] flex flex-col bg-muted/30">
       <div className="p-4 border-b">
@@ -396,16 +580,32 @@ function SignalCardsPanel({
       <ScrollArea className="flex-1 p-4">
         {configs.length > 0 ? (
           <div className="space-y-4">
-            {configs.map((config, idx) => (
-              <SignalCard
-                key={idx}
-                config={config}
-                onPreview={() => onPreview(config)}
-                onCreate={() => onCreate(config)}
-                getMetricLabel={getMetricLabel}
-                getOperatorLabel={getOperatorLabel}
-              />
-            ))}
+            {configs.map((config, idx) => {
+              const signalKey = config.name || `signal-${idx}`
+              const isPool = config._type === 'pool'
+              return isPool ? (
+                <SignalPoolCard
+                  key={idx}
+                  config={config}
+                  onCreate={() => handleCreate(config, true)}
+                  getMetricLabel={getMetricLabel}
+                  getOperatorLabel={getOperatorLabel}
+                  isCreating={creatingSignals.has(signalKey)}
+                  isCreated={createdSignals.has(signalKey)}
+                />
+              ) : (
+                <SignalCard
+                  key={idx}
+                  config={config}
+                  onPreview={() => onPreview(config)}
+                  onCreate={() => handleCreate(config, false)}
+                  getMetricLabel={getMetricLabel}
+                  getOperatorLabel={getOperatorLabel}
+                  isCreating={creatingSignals.has(signalKey)}
+                  isCreated={createdSignals.has(signalKey)}
+                />
+              )
+            })}
           </div>
         ) : (
           <div className="flex items-center justify-center h-full text-muted-foreground">
@@ -422,13 +622,15 @@ function SignalCardsPanel({
 
 // Individual Signal Card Component
 function SignalCard({
-  config, onPreview, onCreate, getMetricLabel, getOperatorLabel
+  config, onPreview, onCreate, getMetricLabel, getOperatorLabel, isCreating, isCreated
 }: {
   config: SignalConfig
   onPreview: () => void
   onCreate: () => void
   getMetricLabel: (m: string) => string
   getOperatorLabel: (o: string) => string
+  isCreating?: boolean
+  isCreated?: boolean
 }) {
   const cond = config.trigger_condition || {}
   const isTakerVolume = cond.metric === 'taker_volume'
@@ -500,9 +702,74 @@ function SignalCard({
         <Button variant="outline" size="sm" className="flex-1" onClick={onPreview} disabled={!isValid}>
           Preview
         </Button>
-        <Button size="sm" className="flex-1" onClick={onCreate} disabled={!isValid}>
-          Create Signal
-        </Button>
+        {isCreated ? (
+          <Button size="sm" className="flex-1" variant="secondary" disabled>
+            <span className="text-green-600">✓ Created</span>
+          </Button>
+        ) : (
+          <Button size="sm" className="flex-1" onClick={onCreate} disabled={!isValid || isCreating}>
+            {isCreating ? 'Creating...' : 'Create Signal'}
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Signal Pool Card Component
+function SignalPoolCard({
+  config, onCreate, getMetricLabel, getOperatorLabel, isCreating, isCreated
+}: {
+  config: SignalConfig
+  onCreate: () => void
+  getMetricLabel: (m: string) => string
+  getOperatorLabel: (o: string) => string
+  isCreating?: boolean
+  isCreated?: boolean
+}) {
+  const signals = config.signals || []
+  const isValid = signals.length > 0 && signals.every(s => s.metric && s.operator && s.threshold !== undefined)
+
+  return (
+    <div className={`rounded-lg border bg-card p-4 ${!isValid ? 'border-destructive/50' : 'border-primary/50'}`}>
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <h4 className="font-semibold text-sm">{config.name || 'Unnamed Pool'}</h4>
+          <p className="text-xs text-muted-foreground">{config.symbol || 'No symbol'}</p>
+        </div>
+        <span className="text-xs bg-primary/20 text-primary px-2 py-1 rounded font-medium">
+          Pool ({config.logic || 'AND'})
+        </span>
+      </div>
+      {config.description && (
+        <p className="text-xs text-muted-foreground mb-3">{config.description}</p>
+      )}
+      <div className="bg-muted/50 rounded p-2 mb-3">
+        <div className="text-xs font-medium mb-2">
+          {signals.length} Signal{signals.length > 1 ? 's' : ''} Combined with {config.logic || 'AND'}:
+        </div>
+        <div className="space-y-1">
+          {signals.map((sig, idx) => (
+            <div key={idx} className="text-xs flex items-center gap-2 bg-background/50 rounded px-2 py-1">
+              <span className="font-medium">{getMetricLabel(sig.metric)}</span>
+              <span className="text-muted-foreground">
+                {getOperatorLabel(sig.operator)} {sig.threshold}
+              </span>
+              <span className="text-muted-foreground">({sig.time_window || '5m'})</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="flex gap-2">
+        {isCreated ? (
+          <Button size="sm" className="flex-1" variant="secondary" disabled>
+            <span className="text-green-600">✓ Pool Created</span>
+          </Button>
+        ) : (
+          <Button size="sm" className="flex-1" onClick={onCreate} disabled={!isValid || isCreating}>
+            {isCreating ? 'Creating...' : 'Create Signal Pool'}
+          </Button>
+        )}
       </div>
     </div>
   )

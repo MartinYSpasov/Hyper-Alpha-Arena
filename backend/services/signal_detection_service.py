@@ -24,6 +24,17 @@ class SignalState:
     last_check_time: float = 0
 
 
+@dataclass
+class PoolState:
+    """Track the active state of a signal pool for edge detection"""
+    pool_id: int
+    symbol: str
+    is_active: bool = False
+    last_check_time: float = 0
+    # Track which signals in the pool are currently meeting their conditions
+    signal_conditions_met: Dict[int, bool] = field(default_factory=dict)
+
+
 class SignalDetectionService:
     """
     Service for detecting signal triggers based on market flow data.
@@ -46,6 +57,9 @@ class SignalDetectionService:
         # Signal states for edge detection: {(signal_id, symbol): SignalState}
         self.signal_states: Dict[tuple, SignalState] = {}
 
+        # Pool states for edge detection: {(pool_id, symbol): PoolState}
+        self.pool_states: Dict[tuple, PoolState] = {}
+
         # Cache of enabled signal pools and their signals
         self._signal_pools_cache: List[dict] = []
         self._signals_cache: Dict[int, dict] = {}
@@ -57,9 +71,13 @@ class SignalDetectionService:
     def detect_signals(self, symbol: str, market_data: Dict[str, Any]) -> List[dict]:
         """
         Detect triggered signals for a symbol based on current market data.
-        Returns list of triggered signals (edge-triggered).
+        Returns list of triggered pools (edge-triggered at pool level).
+
+        Pool-level logic:
+        - OR: Pool triggers when ANY signal condition is met (and pool was not active)
+        - AND: Pool triggers when ALL signal conditions are met (and pool was not active)
         """
-        triggered_signals = []
+        triggered_pools = []
 
         try:
             # Refresh cache if needed
@@ -74,27 +92,16 @@ class SignalDetectionService:
             if not relevant_pools:
                 return []
 
-            # Get all signal IDs from relevant pools
-            signal_ids = set()
+            # Process each pool
             for pool in relevant_pools:
-                signal_ids.update(pool.get("signal_ids", []))
-
-            # Check each signal
-            for signal_id in signal_ids:
-                signal_def = self._signals_cache.get(signal_id)
-                if not signal_def or not signal_def.get("enabled"):
-                    continue
-
-                trigger_result = self._check_signal_trigger(
-                    signal_id, signal_def, symbol, market_data
-                )
-                if trigger_result:
-                    triggered_signals.append(trigger_result)
+                pool_trigger = self._check_pool_trigger(pool, symbol, market_data)
+                if pool_trigger:
+                    triggered_pools.append(pool_trigger)
 
         except Exception as e:
             logger.error(f"Error detecting signals for {symbol}: {e}", exc_info=True)
 
-        return triggered_signals
+        return triggered_pools
 
     def _refresh_cache_if_needed(self):
         """Refresh signal pools and signals cache if TTL expired"""
@@ -109,7 +116,7 @@ class SignalDetectionService:
             try:
                 # Load enabled signal pools
                 result = db.execute(
-                    text("SELECT id, pool_name, signal_ids, symbols, enabled FROM signal_pools WHERE enabled = true")
+                    text("SELECT id, pool_name, signal_ids, symbols, enabled, logic FROM signal_pools WHERE enabled = true")
                 )
                 self._signal_pools_cache = [
                     {
@@ -117,7 +124,8 @@ class SignalDetectionService:
                         "pool_name": row[1],
                         "signal_ids": row[2] or [],
                         "symbols": row[3] or [],
-                        "enabled": row[4]
+                        "enabled": row[4],
+                        "logic": row[5] or "OR"
                     }
                     for row in result.fetchall()
                 ]
@@ -146,6 +154,129 @@ class SignalDetectionService:
         except Exception as e:
             logger.error(f"Failed to refresh signal cache: {e}")
 
+    def _check_pool_trigger(
+        self, pool: dict, symbol: str, market_data: Dict[str, Any]
+    ) -> Optional[dict]:
+        """
+        Check if a signal pool should trigger based on its logic (AND/OR).
+        Implements edge-triggered logic at pool level.
+        """
+        pool_id = pool["id"]
+        pool_name = pool["pool_name"]
+        signal_ids = pool.get("signal_ids", [])
+        logic = pool.get("logic", "OR").upper()
+
+        if not signal_ids:
+            return None
+
+        # Get or create pool state
+        pool_state_key = (pool_id, symbol)
+        if pool_state_key not in self.pool_states:
+            self.pool_states[pool_state_key] = PoolState(pool_id=pool_id, symbol=symbol)
+        pool_state = self.pool_states[pool_state_key]
+
+        # Check each signal's condition (without triggering)
+        signals_met = {}
+        signal_details = {}
+
+        for signal_id in signal_ids:
+            signal_def = self._signals_cache.get(signal_id)
+            if not signal_def or not signal_def.get("enabled"):
+                continue
+
+            condition_result = self._check_signal_condition(
+                signal_id, signal_def, symbol, market_data
+            )
+            if condition_result is not None:
+                signals_met[signal_id] = condition_result["condition_met"]
+                signal_details[signal_id] = condition_result
+
+        if not signals_met:
+            return None
+
+        # Determine pool condition based on logic
+        if logic == "AND":
+            pool_condition_met = all(signals_met.values())
+        else:  # OR
+            pool_condition_met = any(signals_met.values())
+
+        # Edge detection at pool level
+        was_active = pool_state.is_active
+        should_trigger = pool_condition_met and not was_active
+
+        # Update pool state
+        pool_state.is_active = pool_condition_met
+        pool_state.signal_conditions_met = signals_met
+        pool_state.last_check_time = time.time()
+
+        # Log signal conditions for debugging
+        met_signals = [sid for sid, met in signals_met.items() if met]
+        if met_signals:
+            logger.info(
+                f"[PoolCheck] {pool_name} ({logic}) on {symbol}: "
+                f"signals_met={met_signals}, pool_active={pool_condition_met}, "
+                f"was_active={was_active}, trigger={should_trigger}"
+            )
+
+        if should_trigger:
+            # Build trigger result with all signal details
+            trigger_result = {
+                "pool_id": pool_id,
+                "pool_name": pool_name,
+                "symbol": symbol,
+                "logic": logic,
+                "trigger_time": time.time(),
+                "signals_triggered": [
+                    signal_details[sid] for sid in met_signals
+                ],
+                "all_signals": signal_details,
+            }
+            self._log_pool_trigger(trigger_result)
+            return trigger_result
+
+        return None
+
+    def _check_signal_condition(
+        self, signal_id: int, signal_def: dict, symbol: str, market_data: Dict[str, Any]
+    ) -> Optional[dict]:
+        """
+        Check if a signal's condition is met (without edge detection).
+        Returns condition details including whether it's met.
+        """
+        condition = signal_def.get("trigger_condition", {})
+        metric = condition.get("metric")
+        time_window = condition.get("time_window", "5m")
+
+        if not metric:
+            return None
+
+        # Handle taker_volume composite signal
+        if metric == "taker_volume":
+            return self._check_taker_condition(signal_id, signal_def, symbol, condition, time_window)
+
+        # Standard single-value signal
+        operator = condition.get("operator")
+        threshold = condition.get("threshold")
+
+        if not all([operator, threshold is not None]):
+            return None
+
+        current_value = self._get_metric_value(metric, symbol, market_data, time_window)
+        if current_value is None:
+            return None
+
+        condition_met = self._evaluate_condition(current_value, operator, threshold)
+
+        return {
+            "signal_id": signal_id,
+            "signal_name": signal_def.get("signal_name"),
+            "metric": metric,
+            "operator": operator,
+            "threshold": threshold,
+            "current_value": current_value,
+            "condition_met": condition_met,
+        }
+
     def _check_signal_trigger(
         self, signal_id: int, signal_def: dict, symbol: str, market_data: Dict[str, Any]
     ) -> Optional[dict]:
@@ -155,11 +286,22 @@ class SignalDetectionService:
         """
         condition = signal_def.get("trigger_condition", {})
         metric = condition.get("metric")
+        time_window = condition.get("time_window", "5m")
+
+        if not metric:
+            return None
+
+        # Handle taker_volume composite signal
+        if metric == "taker_volume":
+            return self._check_taker_volume_trigger(
+                signal_id, signal_def, symbol, condition, time_window
+            )
+
+        # Standard single-value signal
         operator = condition.get("operator")
         threshold = condition.get("threshold")
-        time_window = condition.get("time_window", 60)  # Default 60 seconds
 
-        if not all([metric, operator, threshold is not None]):
+        if not all([operator, threshold is not None]):
             return None
 
         # Get current metric value
@@ -179,12 +321,21 @@ class SignalDetectionService:
         state = self.signal_states[state_key]
 
         # Edge detection: only trigger when condition changes from False to True
-        should_trigger = condition_met and not state.is_active
+        was_active = state.is_active
+        should_trigger = condition_met and not was_active
 
         # Update state
         state.is_active = condition_met
         state.last_value = current_value
         state.last_check_time = time.time()
+
+        # Debug logging for edge detection (using INFO level for visibility)
+        if condition_met:
+            logger.info(
+                f"[EdgeTrigger] {signal_def.get('signal_name')} on {symbol}: "
+                f"value={current_value:.4f}, threshold={threshold}, "
+                f"was_active={was_active}, is_active={condition_met}, trigger={should_trigger}"
+            )
 
         if should_trigger:
             trigger_result = {
@@ -214,26 +365,32 @@ class SignalDetectionService:
         on prompt-specific data structures.
         """
         try:
-            # Direct metrics from market_data (no DB query needed)
-            if metric == "oi":
-                return self._get_oi(symbol, market_data)
-            elif metric == "funding_rate":
-                return self._get_funding_rate(symbol, market_data)
-
-            # Metrics that need DB query via market_flow_indicators
+            # taker_volume is handled in _check_signal_trigger directly
+            # All other metrics use DB query via market_flow_indicators
             from database.connection import SessionLocal
             from services.market_flow_indicators import get_indicator_value
 
             # Convert time_window to period string
             period = self._time_window_to_period(time_window)
 
-            # Map signal metric names to indicator types
+            # Map old metric names to new names (backward compatibility)
+            metric_name_map = {
+                "oi_delta_percent": "oi_delta",
+                "funding_rate": "funding",
+                "taker_buy_ratio": "taker_ratio",
+            }
+            # Normalize metric name
+            metric = metric_name_map.get(metric, metric)
+
+            # Map signal metric names to indicator types (aligned with K-line)
             indicator_map = {
-                "oi_delta_percent": "OI_DELTA",
+                "oi_delta": "OI_DELTA",
                 "cvd": "CVD",
                 "depth_ratio": "DEPTH",
                 "order_imbalance": "IMBALANCE",
-                "taker_buy_ratio": "TAKER",
+                "taker_ratio": "TAKER",
+                "funding": "FUNDING",
+                "oi": "OI",
             }
 
             if metric not in indicator_map:
@@ -251,6 +408,123 @@ class SignalDetectionService:
         except Exception as e:
             logger.error(f"Error getting metric {metric} for {symbol}: {e}")
             return None
+
+    def _check_taker_condition(
+        self, signal_id: int, signal_def: dict, symbol: str, condition: dict, time_window: str
+    ) -> Optional[dict]:
+        """Check taker_volume condition (without edge detection)."""
+        direction = condition.get("direction", "any")
+        ratio_threshold = condition.get("ratio_threshold", 1.5)
+        volume_threshold = condition.get("volume_threshold", 0)
+
+        from database.connection import SessionLocal
+        from services.market_flow_indicators import _get_taker_data, TIMEFRAME_MS
+        from datetime import datetime
+
+        period = time_window if isinstance(time_window, str) else self._time_window_to_period(time_window)
+        if period not in TIMEFRAME_MS:
+            return None
+
+        interval_ms = TIMEFRAME_MS[period]
+        current_time_ms = int(datetime.utcnow().timestamp() * 1000)
+
+        db = SessionLocal()
+        try:
+            taker_data = _get_taker_data(db, symbol, period, interval_ms, current_time_ms)
+        finally:
+            db.close()
+
+        if not taker_data:
+            return None
+
+        buy = taker_data.get("buy", 0)
+        sell = taker_data.get("sell", 0)
+        total = buy + sell
+
+        condition_met = False
+        actual_direction = None
+        actual_ratio = None
+
+        if total >= volume_threshold and sell > 0:
+            actual_ratio = buy / sell
+            if direction == "buy" and actual_ratio >= ratio_threshold:
+                condition_met = True
+                actual_direction = "buy"
+            elif direction == "sell" and actual_ratio <= 1 / ratio_threshold:
+                condition_met = True
+                actual_direction = "sell"
+            elif direction == "any":
+                if actual_ratio >= ratio_threshold:
+                    condition_met = True
+                    actual_direction = "buy"
+                elif actual_ratio <= 1 / ratio_threshold:
+                    condition_met = True
+                    actual_direction = "sell"
+
+        return {
+            "signal_id": signal_id,
+            "signal_name": signal_def.get("signal_name"),
+            "metric": "taker_volume",
+            "condition_met": condition_met,
+            "direction": actual_direction or direction,
+            "buy": buy,
+            "sell": sell,
+            "total": total,
+            "ratio": actual_ratio,
+            "ratio_threshold": ratio_threshold,
+            "volume_threshold": volume_threshold,
+        }
+
+    def _log_pool_trigger(self, trigger_result: dict):
+        """Log pool trigger to database"""
+        try:
+            import json
+            from database.connection import SessionLocal
+            from sqlalchemy import text
+
+            db = SessionLocal()
+            try:
+                trigger_value_json = json.dumps({
+                    "logic": trigger_result["logic"],
+                    "signals_triggered": [
+                        {
+                            "signal_id": s["signal_id"],
+                            "signal_name": s["signal_name"],
+                            "metric": s["metric"],
+                            "current_value": s.get("current_value"),
+                            "threshold": s.get("threshold"),
+                            "operator": s.get("operator"),
+                        }
+                        for s in trigger_result["signals_triggered"]
+                    ],
+                })
+
+                db.execute(
+                    text("""
+                        INSERT INTO signal_trigger_logs
+                        (pool_id, symbol, trigger_value, triggered_at)
+                        VALUES (:pool_id, :symbol, CAST(:trigger_value AS jsonb), NOW())
+                    """),
+                    {
+                        "pool_id": trigger_result["pool_id"],
+                        "symbol": trigger_result["symbol"],
+                        "trigger_value": trigger_value_json,
+                    }
+                )
+                db.commit()
+
+                signals_info = ", ".join([
+                    s["signal_name"] for s in trigger_result["signals_triggered"]
+                ])
+                logger.info(
+                    f"Pool triggered: {trigger_result['pool_name']} ({trigger_result['logic']}) "
+                    f"on {trigger_result['symbol']} - signals: [{signals_info}]"
+                )
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Failed to log pool trigger: {e}")
 
     def _time_window_to_period(self, time_window: int) -> str:
         """Convert time window (seconds or string) to period string"""
@@ -274,35 +548,181 @@ class SignalDetectionService:
         else:
             return "4h"
 
-    def _get_oi(self, symbol: str, market_data: Dict[str, Any]) -> Optional[float]:
-        """Get open interest from market data"""
-        asset_ctx = market_data.get("asset_ctx", {})
-        oi = asset_ctx.get("openInterest")
-        return float(oi) if oi else None
+    def _check_taker_volume_trigger(
+        self, signal_id: int, signal_def: dict, symbol: str, condition: dict, time_window: str
+    ) -> Optional[dict]:
+        """
+        Check taker_volume composite signal trigger.
+        Condition format:
+        {
+            "metric": "taker_volume",
+            "direction": "buy" | "sell" | "any",
+            "ratio_threshold": 1.5,
+            "volume_threshold": 50000,
+            "time_window": "5m"
+        }
+        """
+        direction = condition.get("direction", "any")
+        ratio_threshold = condition.get("ratio_threshold", 1.5)
+        volume_threshold = condition.get("volume_threshold", 0)
 
-    def _get_funding_rate(self, symbol: str, market_data: Dict[str, Any]) -> Optional[float]:
-        """Get funding rate from market data"""
-        asset_ctx = market_data.get("asset_ctx", {})
-        funding = asset_ctx.get("funding")
-        return float(funding) if funding else None
+        # Get taker data from DB
+        from database.connection import SessionLocal
+        from services.market_flow_indicators import _get_taker_data, TIMEFRAME_MS
+        from datetime import datetime
+
+        period = time_window if isinstance(time_window, str) else self._time_window_to_period(time_window)
+        if period not in TIMEFRAME_MS:
+            return None
+
+        interval_ms = TIMEFRAME_MS[period]
+        current_time_ms = int(datetime.utcnow().timestamp() * 1000)
+
+        db = SessionLocal()
+        try:
+            taker_data = _get_taker_data(db, symbol, period, interval_ms, current_time_ms)
+        finally:
+            db.close()
+
+        if not taker_data:
+            return None
+
+        buy = taker_data.get("buy", 0)
+        sell = taker_data.get("sell", 0)
+        total = buy + sell
+
+        # Check volume threshold
+        if total < volume_threshold:
+            return None
+
+        # Check direction and ratio
+        # Ratio = buy/sell (unified formula)
+        # >1 means buyers dominate, <1 means sellers dominate
+        condition_met = False
+        actual_direction = None
+        actual_ratio = None
+
+        if sell > 0:
+            actual_ratio = buy / sell  # Unified formula
+
+            if direction == "buy":
+                # Buy dominant: ratio >= threshold (e.g., 1.5 means buy is 1.5x of sell)
+                if actual_ratio >= ratio_threshold:
+                    condition_met = True
+                    actual_direction = "buy"
+            elif direction == "sell":
+                # Sell dominant: ratio <= 1/threshold (e.g., threshold=1.5 means sell is 1.5x of buy)
+                if actual_ratio <= 1 / ratio_threshold:
+                    condition_met = True
+                    actual_direction = "sell"
+            elif direction == "any":
+                # Either direction dominant
+                if actual_ratio >= ratio_threshold:
+                    condition_met = True
+                    actual_direction = "buy"
+                elif actual_ratio <= 1 / ratio_threshold:
+                    condition_met = True
+                    actual_direction = "sell"
+
+        # Edge detection
+        state_key = (signal_id, symbol)
+        if state_key not in self.signal_states:
+            self.signal_states[state_key] = SignalState(signal_id=signal_id, symbol=symbol)
+        state = self.signal_states[state_key]
+
+        should_trigger = condition_met and not state.is_active
+
+        state.is_active = condition_met
+        state.last_value = actual_ratio
+        state.last_check_time = time.time()
+
+        if should_trigger and actual_direction and actual_ratio:
+            trigger_result = {
+                "signal_id": signal_id,
+                "signal_name": signal_def.get("signal_name"),
+                "symbol": symbol,
+                "metric": "taker_volume",
+                "trigger_time": time.time(),
+                "description": signal_def.get("description"),
+                # Taker volume specific fields
+                "actual_direction": actual_direction,
+                "buy": buy,
+                "sell": sell,
+                "total": total,
+                "ratio": actual_ratio,
+                "ratio_threshold": ratio_threshold,
+                "volume_threshold": volume_threshold,
+            }
+            self._log_taker_volume_trigger(trigger_result)
+            return trigger_result
+
+        return None
+
+    def _log_taker_volume_trigger(self, trigger_result: dict):
+        """Log taker_volume signal trigger to database"""
+        try:
+            import json
+            from database.connection import SessionLocal
+            from sqlalchemy import text
+
+            db = SessionLocal()
+            try:
+                trigger_value_json = json.dumps({
+                    "direction": trigger_result["actual_direction"],
+                    "buy": trigger_result["buy"],
+                    "sell": trigger_result["sell"],
+                    "total": trigger_result["total"],
+                    "ratio": trigger_result["ratio"],
+                    "ratio_threshold": trigger_result["ratio_threshold"],
+                    "volume_threshold": trigger_result["volume_threshold"],
+                })
+
+                db.execute(
+                    text("""
+                        INSERT INTO signal_trigger_logs
+                        (signal_id, symbol, trigger_value, triggered_at)
+                        VALUES (:signal_id, :symbol, CAST(:trigger_value AS jsonb), NOW())
+                    """),
+                    {
+                        "signal_id": trigger_result["signal_id"],
+                        "symbol": trigger_result["symbol"],
+                        "trigger_value": trigger_value_json,
+                    }
+                )
+                db.commit()
+                logger.info(
+                    f"Taker volume signal triggered: {trigger_result['signal_name']} on {trigger_result['symbol']} "
+                    f"(direction={trigger_result['actual_direction']}, ratio={trigger_result['ratio']:.2f}, "
+                    f"buy={trigger_result['buy']:.0f}, sell={trigger_result['sell']:.0f})"
+                )
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"Failed to log taker volume trigger: {e}")
 
     def _evaluate_condition(self, value: float, operator: str, threshold: float) -> bool:
-        """Evaluate if a condition is met"""
-        if operator == ">":
+        """Evaluate if a condition is met.
+
+        Supports both symbol and text forms of operators for compatibility
+        with AI-generated signal configs.
+        """
+        # Support both symbol and text forms of operators
+        if operator in (">", "greater_than", "gt"):
             return value > threshold
-        elif operator == ">=":
+        elif operator in (">=", "greater_than_or_equal", "gte"):
             return value >= threshold
-        elif operator == "<":
+        elif operator in ("<", "less_than", "lt"):
             return value < threshold
-        elif operator == "<=":
+        elif operator in ("<=", "less_than_or_equal", "lte"):
             return value <= threshold
-        elif operator == "==":
+        elif operator in ("==", "equal", "eq"):
             return abs(value - threshold) < 1e-9
-        elif operator == "!=":
+        elif operator in ("!=", "not_equal", "ne"):
             return abs(value - threshold) >= 1e-9
-        elif operator == "abs_greater_than" or operator == "abs_gt":
+        elif operator in ("abs_greater_than", "abs_gt"):
             return abs(value) > threshold
-        elif operator == "abs_less_than" or operator == "abs_lt":
+        elif operator in ("abs_less_than", "abs_lt"):
             return abs(value) < threshold
         else:
             logger.warning(f"Unknown operator: {operator}")
@@ -311,22 +731,30 @@ class SignalDetectionService:
     def _log_trigger(self, trigger_result: dict):
         """Log signal trigger to database"""
         try:
+            import json
             from database.connection import SessionLocal
             from sqlalchemy import text
 
             db = SessionLocal()
             try:
+                # Store trigger details as JSONB
+                trigger_value_json = json.dumps({
+                    "value": trigger_result["trigger_value"],
+                    "threshold": trigger_result["threshold"],
+                    "operator": trigger_result["operator"],
+                    "metric": trigger_result["metric"],
+                })
+
                 db.execute(
                     text("""
                         INSERT INTO signal_trigger_logs
-                        (signal_id, symbol, trigger_value, threshold, triggered_at)
-                        VALUES (:signal_id, :symbol, :trigger_value, :threshold, NOW())
+                        (signal_id, symbol, trigger_value, triggered_at)
+                        VALUES (:signal_id, :symbol, CAST(:trigger_value AS jsonb), NOW())
                     """),
                     {
                         "signal_id": trigger_result["signal_id"],
                         "symbol": trigger_result["symbol"],
-                        "trigger_value": trigger_result["trigger_value"],
-                        "threshold": trigger_result["threshold"],
+                        "trigger_value": trigger_value_json,
                     }
                 )
                 db.commit()
@@ -343,26 +771,49 @@ class SignalDetectionService:
     def get_signal_states(self) -> Dict[str, Any]:
         """Get current signal states for debugging/monitoring"""
         return {
-            f"{state.signal_id}:{state.symbol}": {
-                "is_active": state.is_active,
-                "last_value": state.last_value,
-                "last_check_time": state.last_check_time,
+            "signal_states": {
+                f"{state.signal_id}:{state.symbol}": {
+                    "is_active": state.is_active,
+                    "last_value": state.last_value,
+                    "last_check_time": state.last_check_time,
+                }
+                for state_key, state in self.signal_states.items()
+            },
+            "pool_states": {
+                f"{state.pool_id}:{state.symbol}": {
+                    "is_active": state.is_active,
+                    "signal_conditions_met": state.signal_conditions_met,
+                    "last_check_time": state.last_check_time,
+                }
+                for state_key, state in self.pool_states.items()
             }
-            for state_key, state in self.signal_states.items()
         }
 
-    def reset_state(self, signal_id: int = None, symbol: str = None):
-        """Reset signal states (useful for testing)"""
-        if signal_id is None and symbol is None:
+    def reset_state(self, signal_id: int = None, pool_id: int = None, symbol: str = None):
+        """Reset signal and pool states (useful for testing)"""
+        if signal_id is None and pool_id is None and symbol is None:
             self.signal_states.clear()
+            self.pool_states.clear()
         else:
-            keys_to_remove = [
-                k for k in self.signal_states.keys()
-                if (signal_id is None or k[0] == signal_id) and
-                   (symbol is None or k[1] == symbol)
-            ]
-            for k in keys_to_remove:
-                del self.signal_states[k]
+            # Reset signal states
+            if signal_id is not None or symbol is not None:
+                keys_to_remove = [
+                    k for k in self.signal_states.keys()
+                    if (signal_id is None or k[0] == signal_id) and
+                       (symbol is None or k[1] == symbol)
+                ]
+                for k in keys_to_remove:
+                    del self.signal_states[k]
+
+            # Reset pool states
+            if pool_id is not None or symbol is not None:
+                keys_to_remove = [
+                    k for k in self.pool_states.keys()
+                    if (pool_id is None or k[0] == pool_id) and
+                       (symbol is None or k[1] == symbol)
+                ]
+                for k in keys_to_remove:
+                    del self.pool_states[k]
 
 
 # Singleton instance

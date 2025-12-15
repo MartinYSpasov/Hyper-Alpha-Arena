@@ -125,6 +125,26 @@ async function deletePool(id: number): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete pool')
 }
 
+// Create signal pool from AI-generated config
+async function createPoolFromConfig(config: {
+  name: string
+  symbol: string
+  description?: string
+  logic: string
+  signals: Array<{ metric: string; operator: string; threshold: number; time_window?: string }>
+}): Promise<{ success: boolean; pool: SignalPool; signals: SignalDefinition[] }> {
+  const res = await fetch(`${API_BASE}/create-pool-from-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Failed to create pool' }))
+    throw new Error(error.detail || 'Failed to create pool')
+  }
+  return res.json()
+}
+
 async function fetchTriggerLogs(poolId?: number, limit = 50): Promise<SignalTriggerLog[]> {
   const params = new URLSearchParams({ limit: String(limit) })
   if (poolId) params.set('pool_id', String(poolId))
@@ -132,6 +152,13 @@ async function fetchTriggerLogs(poolId?: number, limit = 50): Promise<SignalTrig
   if (!res.ok) throw new Error('Failed to fetch logs')
   const data = await res.json()
   return data.logs
+}
+
+async function fetchPoolBacktest(poolId: number, symbol: string): Promise<any> {
+  const params = new URLSearchParams({ symbol })
+  const res = await fetch(`${API_BASE}/pool-backtest/${poolId}?${params}`)
+  if (!res.ok) throw new Error('Failed to fetch pool backtest')
+  return res.json()
 }
 
 interface MetricAnalysis {
@@ -246,10 +273,21 @@ export default function SignalManager() {
   const [previewData, setPreviewData] = useState<any>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
 
+  // Save/delete loading states (for dialog buttons)
+  const [savingSignal, setSavingSignal] = useState(false)
+  const [savingPool, setSavingPool] = useState(false)
+
   // AI Signal Chat state
   const [aiChatOpen, setAiChatOpen] = useState(false)
   const [accounts, setAccounts] = useState<any[]>([])
   const [accountsLoading, setAccountsLoading] = useState(false)
+
+  // Watchlist symbols for preview and analysis
+  const [watchlistSymbols, setWatchlistSymbols] = useState<string[]>([])
+  const [analysisSymbol, setAnalysisSymbol] = useState('BTC')
+
+  // Pool preview state
+  const [previewPool, setPreviewPool] = useState<SignalPool | null>(null)
 
   const loadData = async () => {
     try {
@@ -263,6 +301,17 @@ export default function SignalManager() {
       toast.error('Failed to load signal data')
     } finally {
       setLoading(false)
+    }
+  }
+
+  // Silent refresh - no loading state, for use after save/delete operations
+  const refreshDataSilently = async () => {
+    try {
+      const data = await fetchSignals()
+      setSignals(data.signals)
+      setPools(data.pools)
+    } catch (err) {
+      // Silent fail - data will refresh on next load
     }
   }
 
@@ -292,10 +341,28 @@ export default function SignalManager() {
     }
   }
 
+  // Load watchlist symbols
+  const loadWatchlist = async () => {
+    try {
+      const res = await fetch('/api/hyperliquid/symbols/watchlist')
+      if (res.ok) {
+        const data = await res.json()
+        const symbols = data.symbols || []
+        setWatchlistSymbols(symbols)
+        if (symbols.length > 0 && !symbols.includes(analysisSymbol)) {
+          setAnalysisSymbol(symbols[0])
+        }
+      }
+    } catch {
+      // Silent fail
+    }
+  }
+
   // Initial load
   useEffect(() => {
     loadData()
     loadAccounts()
+    loadWatchlist()
   }, [])
 
   // Auto-refresh logs only when on logs tab (silent, no loading)
@@ -305,7 +372,7 @@ export default function SignalManager() {
     return () => clearInterval(interval)
   }, [activeTab])
 
-  // Fetch metric analysis when dialog opens or metric/period changes
+  // Fetch metric analysis when dialog opens or metric/period/symbol changes
   useEffect(() => {
     if (!signalDialogOpen) {
       setMetricAnalysis(null)
@@ -316,7 +383,7 @@ export default function SignalManager() {
     const loadAnalysis = async () => {
       setAnalysisLoading(true)
       try {
-        const data = await fetchMetricAnalysis('BTC', signalForm.metric, signalForm.time_window)
+        const data = await fetchMetricAnalysis(analysisSymbol, signalForm.metric, signalForm.time_window)
         setMetricAnalysis(data)
       } catch {
         setMetricAnalysis(null)
@@ -325,7 +392,7 @@ export default function SignalManager() {
       }
     }
     loadAnalysis()
-  }, [signalDialogOpen, signalForm.metric, signalForm.time_window])
+  }, [signalDialogOpen, signalForm.metric, signalForm.time_window, analysisSymbol])
 
   const openSignalDialog = (signal?: SignalDefinition) => {
     if (signal) {
@@ -370,6 +437,7 @@ export default function SignalManager() {
   }
 
   const handleSaveSignal = async () => {
+    setSavingSignal(true)
     try {
       // Build trigger_condition based on metric type
       let trigger_condition: Record<string, unknown>
@@ -405,9 +473,11 @@ export default function SignalManager() {
         toast.success('Signal created')
       }
       setSignalDialogOpen(false)
-      loadData()
+      refreshDataSilently()
     } catch (err) {
       toast.error('Failed to save signal')
+    } finally {
+      setSavingSignal(false)
     }
   }
 
@@ -416,7 +486,7 @@ export default function SignalManager() {
     try {
       await deleteSignal(id)
       toast.success('Signal deleted')
-      loadData()
+      refreshDataSilently()
     } catch (err) {
       toast.error('Failed to delete signal')
     }
@@ -424,6 +494,7 @@ export default function SignalManager() {
 
   const openPreviewDialog = async (signal: SignalDefinition, symbol: string = 'BTC') => {
     setPreviewSignal(signal)
+    setPreviewPool(null)
     setPreviewSymbol(symbol)
     setPreviewDialogOpen(true)
     setPreviewLoading(true)
@@ -479,8 +550,65 @@ export default function SignalManager() {
     }
   }
 
-  // AI Signal handlers
-  const handleAiCreateSignal = async (config: any) => {
+  const openPoolPreviewDialog = async (pool: SignalPool, symbol: string = 'BTC') => {
+    setPreviewPool(pool)
+    setPreviewSignal(null)
+    setPreviewSymbol(symbol)
+    setPreviewDialogOpen(true)
+    setPreviewLoading(true)
+    setPreviewData(null)
+
+    try {
+      // Use first signal's time_window or default to 5m
+      const firstSignalId = pool.signal_ids[0]
+      const firstSignal = signals.find(s => s.id === firstSignalId)
+      const timeWindow = firstSignal?.trigger_condition?.time_window || '5m'
+
+      // Step 1: Fetch K-lines
+      const klineRes = await fetch(
+        `/api/market/kline-with-indicators/${symbol}?market=hyperliquid&period=${timeWindow}&count=500`
+      )
+      if (!klineRes.ok) throw new Error('Failed to fetch K-line data')
+      const klineData = await klineRes.json()
+
+      if (!klineData.klines || klineData.klines.length === 0) {
+        throw new Error('No K-line data available')
+      }
+
+      const klines = klineData.klines
+      const klineMinTs = Math.min(...klines.map((k: any) => k.timestamp)) * 1000
+      const klineMaxTs = Math.max(...klines.map((k: any) => k.timestamp)) * 1000
+
+      // Step 2: Fetch pool backtest
+      const triggerRes = await fetch(
+        `/api/signals/pool-backtest/${pool.id}?symbol=${symbol}&kline_min_ts=${klineMinTs}&kline_max_ts=${klineMaxTs}`
+      )
+      if (!triggerRes.ok) throw new Error('Failed to fetch pool backtest')
+      const triggerData = await triggerRes.json()
+
+      const formattedKlines = klines.map((k: any) => ({
+        timestamp: k.timestamp * 1000,
+        open: k.open,
+        high: k.high,
+        low: k.low,
+        close: k.close,
+      }))
+
+      setPreviewData({
+        ...triggerData,
+        klines: formattedKlines,
+        kline_count: formattedKlines.length,
+        isPoolPreview: true,
+      })
+    } catch (err) {
+      toast.error('Failed to load pool preview data')
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
+  // AI Signal handlers - returns true on success for UI feedback
+  const handleAiCreateSignal = async (config: any): Promise<boolean> => {
     try {
       const signalData = {
         signal_name: config.name,
@@ -489,11 +617,38 @@ export default function SignalManager() {
         enabled: true,
       }
       await createSignal(signalData)
-      toast.success('Signal created successfully')
-      loadData()
-      setAiChatOpen(false)
+      toast.success(`Signal "${config.name}" created`)
+      // Silent refresh - don't close dialog, user may want to create more signals
+      const data = await fetchSignals()
+      setSignals(data.signals)
+      setPools(data.pools)
+      return true
     } catch (err) {
       toast.error('Failed to create signal')
+      return false
+    }
+  }
+
+  // AI Signal Pool handler - creates pool from AI-generated config
+  const handleAiCreatePool = async (config: any): Promise<boolean> => {
+    try {
+      const poolConfig = {
+        name: config.name,
+        symbol: config.symbol,
+        description: config.description || '',
+        logic: config.logic || 'AND',
+        signals: config.signals || [],
+      }
+      const result = await createPoolFromConfig(poolConfig)
+      toast.success(`Signal Pool "${config.name}" created with ${result.signals.length} signals`)
+      // Refresh signals and pools
+      const data = await fetchSignals()
+      setSignals(data.signals)
+      setPools(data.pools)
+      return true
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to create signal pool')
+      return false
     }
   }
 
@@ -586,6 +741,7 @@ export default function SignalManager() {
   }
 
   const handleSavePool = async () => {
+    setSavingPool(true)
     try {
       if (editingPool) {
         await updatePool(editingPool.id, poolForm)
@@ -595,9 +751,11 @@ export default function SignalManager() {
         toast.success('Pool created')
       }
       setPoolDialogOpen(false)
-      loadData()
+      refreshDataSilently()
     } catch (err) {
       toast.error('Failed to save pool')
+    } finally {
+      setSavingPool(false)
     }
   }
 
@@ -606,7 +764,7 @@ export default function SignalManager() {
     try {
       await deletePool(id)
       toast.success('Pool deleted')
-      loadData()
+      refreshDataSilently()
     } catch (err) {
       toast.error('Failed to delete pool')
     }
@@ -656,26 +814,24 @@ export default function SignalManager() {
             <TabsTrigger value="pools" className="min-w-[120px]">Signal Pools</TabsTrigger>
             <TabsTrigger value="logs" className="min-w-[120px]">Trigger Logs</TabsTrigger>
           </TabsList>
-          {activeTab === 'signals' && (
-            <div className="flex gap-2">
-              <Button onClick={() => openSignalDialog()} size="sm">
-                <Plus className="w-4 h-4 mr-2" />New Signal
-              </Button>
-              <Button
-                onClick={() => setAiChatOpen(true)}
-                size="sm"
-                className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white border-0 shadow-lg hover:shadow-xl transition-all"
-              >
-                <Sparkles className="w-4 h-4 mr-2" />AI Set Signal
-              </Button>
-            </div>
-          )}
-          {activeTab === 'pools' && (
-            <Button onClick={() => openPoolDialog()} size="sm"><Plus className="w-4 h-4 mr-2" />New Pool</Button>
-          )}
+          <div className="flex gap-2 ml-auto">
+            <Button onClick={() => openSignalDialog()} size="sm">
+              <Plus className="w-4 h-4 mr-2" />New Signal
+            </Button>
+            <Button onClick={() => openPoolDialog()} size="sm">
+              <Plus className="w-4 h-4 mr-2" />New Pool
+            </Button>
+            <Button
+              onClick={() => setAiChatOpen(true)}
+              size="sm"
+              className="bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white border-0 shadow-lg hover:shadow-xl transition-all"
+            >
+              <Sparkles className="w-4 h-4 mr-2" />AI Set Signal
+            </Button>
+          </div>
         </div>
 
-        <TabsContent value="signals" className="space-y-4">
+        <TabsContent value="signals" className="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto">
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {signals.map(signal => (
               <Card key={signal.id}>
@@ -712,7 +868,7 @@ export default function SignalManager() {
           </div>
         </TabsContent>
 
-        <TabsContent value="pools" className="space-y-4">
+        <TabsContent value="pools" className="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto">
           <div className="grid gap-4 md:grid-cols-2">
             {pools.map(pool => (
               <Card key={pool.id}>
@@ -750,9 +906,19 @@ export default function SignalManager() {
                         {pool.logic === 'AND' ? '(All signals must trigger)' : '(Any signal triggers)'}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`w-2 h-2 rounded-full ${pool.enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
-                      <span className="text-xs">{pool.enabled ? 'Enabled' : 'Disabled'}</span>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`w-2 h-2 rounded-full ${pool.enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
+                        <span className="text-xs">{pool.enabled ? 'Enabled' : 'Disabled'}</span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openPoolPreviewDialog(pool, watchlistSymbols[0] || 'BTC')}
+                        disabled={pool.signal_ids.length === 0}
+                      >
+                        <Eye className="w-4 h-4 mr-1" />Preview
+                      </Button>
                     </div>
                   </div>
                 </CardContent>
@@ -973,7 +1139,24 @@ export default function SignalManager() {
 
             {/* Statistical Analysis Preview */}
             <div className="p-3 bg-muted/50 rounded-lg border">
-              <div className="text-sm font-medium mb-2">Statistical Analysis (BTC)</div>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-sm font-medium">Statistical Analysis</span>
+                <Select value={analysisSymbol} onValueChange={setAnalysisSymbol}>
+                  <SelectTrigger className="w-24 h-7 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {watchlistSymbols.length > 0 ? (
+                      watchlistSymbols.map(sym => <SelectItem key={sym} value={sym}>{sym}</SelectItem>)
+                    ) : (
+                      <SelectItem value="BTC">BTC</SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+                {watchlistSymbols.length === 0 && (
+                  <span className="text-xs text-muted-foreground">(Add symbols in AI Trader)</span>
+                )}
+              </div>
               {analysisLoading ? (
                 <p className="text-xs text-muted-foreground">Loading analysis...</p>
               ) : metricAnalysis?.status === 'ok' && metricAnalysis.metric === signalForm.metric ? (
@@ -1084,8 +1267,10 @@ export default function SignalManager() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setSignalDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleSaveSignal}>Save</Button>
+            <Button variant="outline" onClick={() => setSignalDialogOpen(false)} disabled={savingSignal}>Cancel</Button>
+            <Button onClick={handleSaveSignal} disabled={savingSignal}>
+              {savingSignal ? 'Saving...' : 'Save'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1158,19 +1343,25 @@ export default function SignalManager() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPoolDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleSavePool}>Save</Button>
+            <Button variant="outline" onClick={() => setPoolDialogOpen(false)} disabled={savingPool}>Cancel</Button>
+            <Button onClick={handleSavePool} disabled={savingPool}>
+              {savingPool ? 'Saving...' : 'Save'}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Signal Preview Dialog */}
+      {/* Signal/Pool Preview Dialog */}
       <Dialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen}>
         <DialogContent className="w-[1200px] max-w-[95vw] h-[800px] max-h-[95vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Signal Preview: {previewSignal?.signal_name}</DialogTitle>
+            <DialogTitle>
+              {previewPool ? `Pool Preview: ${previewPool.pool_name}` : `Signal Preview: ${previewSignal?.signal_name}`}
+            </DialogTitle>
             <DialogDescription>
-              Historical backtest showing where this signal would have triggered
+              {previewPool
+                ? `Historical backtest showing combined triggers (${previewPool.logic || 'OR'} logic)`
+                : 'Historical backtest showing where this signal would have triggered'}
             </DialogDescription>
           </DialogHeader>
 
@@ -1210,10 +1401,29 @@ export default function SignalManager() {
 
               {/* Condition Display */}
               <div className="bg-muted p-3 rounded text-sm">
-                <span className="text-muted-foreground">Condition: </span>
-                <span className="font-mono">
-                  {previewData.condition?.metric} {previewData.condition?.operator} {previewData.condition?.threshold}
-                </span>
+                {previewData.isPoolPreview ? (
+                  <div className="space-y-1">
+                    <div>
+                      <span className="text-muted-foreground">Logic: </span>
+                      <span className={`px-2 py-0.5 rounded ${previewData.logic === 'AND' ? 'bg-blue-500/20 text-blue-400' : 'bg-green-500/20 text-green-400'}`}>
+                        {previewData.logic || 'OR'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Signals: </span>
+                      <span className="font-mono">
+                        {Object.values(previewData.signal_names || {}).join(', ')}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <span className="text-muted-foreground">Condition: </span>
+                    <span className="font-mono">
+                      {previewData.condition?.metric} {previewData.condition?.operator} {previewData.condition?.threshold}
+                    </span>
+                  </>
+                )}
               </div>
 
               {/* Chart */}
@@ -1226,18 +1436,31 @@ export default function SignalManager() {
               </div>
 
               {/* Symbol Selector */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-sm text-muted-foreground">Change symbol:</span>
-                {SYMBOLS.map(sym => (
-                  <Button
-                    key={sym}
-                    variant={previewSymbol === sym ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => previewSignal && openPreviewDialog(previewSignal, sym)}
-                  >
-                    {sym}
-                  </Button>
-                ))}
+                {watchlistSymbols.length > 0 ? (
+                  watchlistSymbols.map(sym => (
+                    <Button
+                      key={sym}
+                      variant={previewSymbol === sym ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => {
+                        if (previewPool) {
+                          openPoolPreviewDialog(previewPool, sym)
+                        } else if (previewSignal) {
+                          openPreviewDialog(previewSignal, sym)
+                        }
+                      }}
+                    >
+                      {sym}
+                    </Button>
+                  ))
+                ) : (
+                  <span className="text-sm text-muted-foreground italic">No symbols in Watchlist</span>
+                )}
+                <span className="text-xs text-muted-foreground ml-2">
+                  (Manage symbols in AI Trader page)
+                </span>
               </div>
             </div>
           ) : (
@@ -1253,6 +1476,7 @@ export default function SignalManager() {
         open={aiChatOpen}
         onOpenChange={setAiChatOpen}
         onCreateSignal={handleAiCreateSignal}
+        onCreatePool={handleAiCreatePool}
         onPreviewSignal={handleAiPreviewSignal}
         accounts={accounts}
         accountsLoading={accountsLoading}

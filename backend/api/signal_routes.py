@@ -318,6 +318,24 @@ def backtest_preview(
     return result
 
 
+@router.get("/pool-backtest/{pool_id}")
+def backtest_pool(
+    pool_id: int,
+    symbol: str = Query(..., description="Trading symbol (e.g., BTC)"),
+    kline_min_ts: int = Query(None, description="Min K-line timestamp in ms"),
+    kline_max_ts: int = Query(None, description="Max K-line timestamp in ms"),
+    db: Session = Depends(get_db)
+):
+    """
+    Backtest a signal pool against historical data.
+    Combines triggers from multiple signals based on pool logic (AND/OR).
+    """
+    from services.signal_backtest_service import signal_backtest_service
+
+    result = signal_backtest_service.backtest_pool(db, pool_id, symbol, kline_min_ts, kline_max_ts)
+    return result
+
+
 # ============ Trigger Logs ============
 
 @router.get("/logs", response_model=SignalTriggerLogsResponse)
@@ -467,8 +485,10 @@ def reset_signal_states(
 
 # ============ AI Signal Generation Chat APIs ============
 
+from fastapi.responses import StreamingResponse
 from services.ai_signal_generation_service import (
     generate_signal_with_ai,
+    generate_signal_with_ai_stream,
     get_signal_conversation_history,
     get_signal_conversation_messages
 )
@@ -566,3 +586,159 @@ def get_ai_signal_conversation_messages(
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     return {"messages": messages}
+
+
+# ============ AI Signal Generation SSE Streaming ============
+
+@router.post("/ai-chat-stream")
+async def ai_signal_chat_stream(
+    request: AiSignalChatRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Send a message to AI signal generation assistant with SSE streaming.
+
+    Returns a Server-Sent Events stream with the following event types:
+    - status: Progress status message
+    - tool_call: Tool being called with arguments
+    - tool_result: Result from tool execution
+    - reasoning: AI reasoning content (for reasoning models)
+    - content: AI response content chunk
+    - signal_config: Parsed signal configuration
+    - done: Completion with final result
+    - error: Error occurred
+    """
+    user = db.query(User).filter(User.username == "default").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    def event_generator():
+        for event in generate_signal_with_ai_stream(
+            db=db,
+            account_id=request.account_id,
+            user_message=request.user_message,
+            conversation_id=request.conversation_id,
+            user_id=user.id
+        ):
+            yield event
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+# ============ AI Signal Pool Creation ============
+
+class SignalPoolConfigRequest(BaseModel):
+    """Request for creating signal pool from AI-generated config"""
+    name: str = Field(..., description="Pool name")
+    symbol: str = Field(..., description="Trading symbol (e.g., BTC)")
+    description: Optional[str] = Field(None, description="Pool description")
+    logic: str = Field("AND", description="Combination logic: AND or OR")
+    signals: List[dict] = Field(..., description="List of signal configurations")
+
+    class Config:
+        populate_by_name = True
+
+
+@router.post("/create-pool-from-config")
+def create_pool_from_config(
+    request: SignalPoolConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Create a signal pool from AI-generated configuration.
+    Creates individual signals and combines them into a pool.
+    """
+    import json
+
+    if not request.signals:
+        raise HTTPException(status_code=400, detail="No signals provided")
+
+    if len(request.signals) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 signals per pool")
+
+    created_signal_ids = []
+    created_signals = []
+
+    try:
+        # Create each signal
+        for i, sig in enumerate(request.signals):
+            # Generate signal name if not provided
+            sig_name = sig.get("name") or f"{request.name}_{i+1}"
+
+            # Build trigger condition
+            trigger_condition = {
+                "metric": sig.get("metric") or sig.get("indicator"),
+                "operator": sig.get("operator"),
+                "threshold": sig.get("threshold"),
+                "time_window": sig.get("time_window")
+            }
+
+            # Validate required fields
+            if not all([trigger_condition["metric"], trigger_condition["operator"],
+                       trigger_condition["threshold"] is not None, trigger_condition["time_window"]]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Signal {i+1} missing required fields (metric, operator, threshold, time_window)"
+                )
+
+            # Create signal
+            result = db.execute(text("""
+                INSERT INTO signal_definitions (signal_name, description, trigger_condition, enabled)
+                VALUES (:name, :desc, :condition, :enabled)
+                RETURNING id, signal_name, description, trigger_condition, enabled, created_at
+            """), {
+                "name": sig_name,
+                "desc": sig.get("description") or f"Part of {request.name}",
+                "condition": json.dumps(trigger_condition),
+                "enabled": True
+            })
+            row = result.fetchone()
+            created_signal_ids.append(row[0])
+            created_signals.append({
+                "id": row[0],
+                "signal_name": row[1],
+                "trigger_condition": trigger_condition
+            })
+
+        # Create the pool
+        pool_result = db.execute(text("""
+            INSERT INTO signal_pools (pool_name, signal_ids, symbols, enabled, logic)
+            VALUES (:name, :signal_ids, :symbols, :enabled, :logic)
+            RETURNING id, pool_name, signal_ids, symbols, enabled, created_at, logic
+        """), {
+            "name": request.name,
+            "signal_ids": json.dumps(created_signal_ids),
+            "symbols": json.dumps([request.symbol]),
+            "enabled": True,
+            "logic": request.logic
+        })
+        pool_row = pool_result.fetchone()
+
+        db.commit()
+
+        return {
+            "success": True,
+            "pool": {
+                "id": pool_row[0],
+                "pool_name": pool_row[1],
+                "signal_ids": created_signal_ids,
+                "symbols": [request.symbol],
+                "logic": request.logic
+            },
+            "signals": created_signals
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create pool: {str(e)}")
