@@ -377,7 +377,7 @@ export default function AlphaArenaFeed({
       return null
     }
 
-  }, [activeAccount, cacheKey, updateData, tradingMode, walletAddress, modelChat, mergeModelChatData])
+  }, [activeAccount, cacheKey, updateData, tradingMode, walletAddress, modelChat, mergeModelChatData, selectedSymbol])
 
   // Load more model chat entries (lazy loading)
   const loadMoreModelChat = useCallback(async () => {
@@ -560,11 +560,6 @@ export default function AlphaArenaFeed({
     fetchWatchlist();
   }, [positions, activeAccount]);
 
-  // Refresh ModelChat when selectedSymbol changes
-  useEffect(() => {
-    loadModelChatData();
-    loadTradesData()
-  }, [selectedSymbol, loadModelChatData, loadTradesData]);
 
 
   const accountOptions = useMemo(() => {
@@ -679,9 +674,7 @@ export default function AlphaArenaFeed({
                 {meta.name}{meta.model ? ` (${meta.model})` : ''}
               </option>
             ))}
-        </select>
-        </div>
-        <div className="flex items-center gap-2">
+          </select>
           <select
             value={selectedSymbol || ''}
             onChange={(e) => setSelectedSymbol(e.target.value || null)}
@@ -696,8 +689,7 @@ export default function AlphaArenaFeed({
             ))}
           </select>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>Showing last {DEFAULT_LIMIT} trades</span>
+        <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleRefreshClick} disabled={loadingTrades || loadingModelChat || loadingPositions}>
             Refresh
           </Button>
