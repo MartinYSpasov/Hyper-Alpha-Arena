@@ -332,7 +332,8 @@ def preview_prompt(
 
                 client = get_hyperliquid_client(db, account_id, override_environment=hyperliquid_environment)
                 account_state = client.get_account_state(db)
-                positions = client.get_positions(db)
+                # include_timing=True for prompt preview to show position holding duration
+                positions = client.get_positions(db, include_timing=True)
 
                 # Build portfolio with Hyperliquid data
                 portfolio = {

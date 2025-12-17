@@ -39,7 +39,7 @@ export default function PositionsTable({
   accountId,
   environment,
   autoRefresh = false,
-  refreshInterval = 30,
+  refreshInterval = 300,
   refreshTrigger,
   onPositionClosed,
   className,

@@ -454,12 +454,14 @@ class HyperliquidTradingClient:
             logger.error(f"Failed to get account state: {e}", exc_info=True)
             raise
 
-    def get_positions(self, db: Session) -> List[Dict[str, Any]]:
+    def get_positions(self, db: Session, include_timing: bool = False) -> List[Dict[str, Any]]:
         """
-        Get all open positions from Hyperliquid with timing information
+        Get all open positions from Hyperliquid
 
         Args:
             db: Database session
+            include_timing: If True, fetch user_fills to calculate position opened times.
+                           Only needed for AI decision prompts. Default False to save API calls.
 
         Returns:
             List of position dicts, each with:
@@ -471,10 +473,10 @@ class HyperliquidTradingClient:
                 - margin_used: Margin used for this position
                 - liquidation_px: Liquidation price
                 - leverage: Current leverage
-                - opened_at: Timestamp when position was opened (milliseconds)
-                - opened_at_str: Human-readable opened time
-                - holding_duration_seconds: How long position has been held
-                - holding_duration_str: Human-readable holding duration
+                - opened_at: Timestamp when position was opened (only if include_timing=True)
+                - opened_at_str: Human-readable opened time (only if include_timing=True)
+                - holding_duration_seconds: How long position has been held (only if include_timing=True)
+                - holding_duration_str: Human-readable holding duration (only if include_timing=True)
 
         Raises:
             EnvironmentMismatchError: If environment validation fails
@@ -493,14 +495,15 @@ class HyperliquidTradingClient:
             print(f"=== END CCXT RAW DATA ===")
             logger.info(f"CCXT RAW POSITIONS DATA: {positions_raw}")
 
-            # Get user fills to calculate position opened times
+            # Get user fills to calculate position opened times (only when needed for AI prompts)
             user_fills = []
-            try:
-                user_fills = self._get_user_fills(db)
-                logger.info(f"Retrieved {len(user_fills)} user fills for position timing calculation")
-            except Exception as fills_error:
-                logger.warning(f"Failed to get user fills for position timing: {fills_error}")
-                # Continue without timing information
+            if include_timing:
+                try:
+                    user_fills = self._get_user_fills(db)
+                    logger.info(f"Retrieved {len(user_fills)} user fills for position timing calculation")
+                except Exception as fills_error:
+                    logger.warning(f"Failed to get user fills for position timing: {fills_error}")
+                    # Continue without timing information
 
             # Transform CCXT positions to our format
             positions = []

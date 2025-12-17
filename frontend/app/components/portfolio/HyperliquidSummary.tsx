@@ -127,7 +127,7 @@ export default function HyperliquidSummary({ accountId, refreshKey }: Hyperliqui
       accountId={accountId!}
       environment={state.environment}
       autoRefresh={false}
-      refreshInterval={30}
+      refreshInterval={300}
       refreshToken={refreshKey}
     />
   )

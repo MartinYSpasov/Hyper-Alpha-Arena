@@ -531,7 +531,7 @@ function App() {
     }
   }, [tradingMode, account])
 
-  // Auto-refresh via WebSocket every 30 seconds (no console spam)
+  // Auto-refresh via WebSocket every 5 minutes (matches backend cache update interval)
   useEffect(() => {
     const refreshInterval = setInterval(() => {
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !account) {
@@ -548,7 +548,7 @@ function App() {
         trading_mode: tradingMode,
         ...(env ? { environment: env } : {})
       }))
-    }, 30000)
+    }, 300000)
 
     return () => clearInterval(refreshInterval)
   }, [account, tradingMode])

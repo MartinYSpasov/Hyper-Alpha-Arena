@@ -101,7 +101,7 @@ async def list_all_accounts(db: Session = Depends(get_db)):
             # For Hyperliquid accounts, fetch real-time balance
             if hyperliquid_environment in ["testnet", "mainnet"]:
                 try:
-                    cached_entry = get_cached_account_state(account.id)
+                    cached_entry = get_cached_account_state(account.id, hyperliquid_environment)
                     if cached_entry:
                         account_state = cached_entry["data"]
                     else:

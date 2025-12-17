@@ -19,7 +19,7 @@ export default function BalanceCard({
   accountId,
   environment,
   autoRefresh = false,
-  refreshInterval = 30,
+  refreshInterval = 300,
   refreshTrigger,
 }: BalanceCardProps) {
   const [balance, setBalance] = useState<HyperliquidBalance | null>(null);

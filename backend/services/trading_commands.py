@@ -443,8 +443,9 @@ def place_ai_driven_hyperliquid_order(
                 continue
 
             # Get open positions from Hyperliquid (must check before skipping due to equity)
+            # include_timing=True to get position opened times for AI prompt context
             try:
-                positions = client.get_positions(db)
+                positions = client.get_positions(db, include_timing=True)
                 logger.info(f"Account {account.name} has {len(positions)} open positions")
             except Exception as pos_err:
                 logger.error(f"Failed to get positions for {account.name}: {pos_err}")

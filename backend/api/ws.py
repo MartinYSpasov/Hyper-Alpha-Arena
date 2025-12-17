@@ -407,8 +407,8 @@ async def _send_hyperliquid_snapshot(db: Session, account_id: int, environment: 
         logging.debug(f"No {environment} wallet configured for account {account.name} (ID: {account_id})")
         return
 
-    cached_state = get_cached_account_state(account_id, max_age_seconds=HYPERLIQUID_SNAPSHOT_CACHE_TTL)
-    cached_positions = get_cached_positions(account_id, max_age_seconds=HYPERLIQUID_SNAPSHOT_CACHE_TTL)
+    cached_state = get_cached_account_state(account_id, environment, max_age_seconds=HYPERLIQUID_SNAPSHOT_CACHE_TTL)
+    cached_positions = get_cached_positions(account_id, environment, max_age_seconds=HYPERLIQUID_SNAPSHOT_CACHE_TTL)
     account_state = cached_state["data"] if cached_state else None
     positions_data = cached_positions["data"] if cached_positions else None
     wallet_address = None

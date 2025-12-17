@@ -93,7 +93,7 @@ export default function HyperliquidPage() {
                 accountId={selectedWallet.account_id}
                 environment={selectedWallet.environment}
                 autoRefresh={true}
-                refreshInterval={30}
+                refreshInterval={300}
                 refreshTrigger={refreshTrigger}
               />
 
@@ -129,7 +129,7 @@ export default function HyperliquidPage() {
               accountId={selectedWallet.account_id}
               environment={selectedWallet.environment}
               autoRefresh={true}
-              refreshInterval={30}
+              refreshInterval={300}
               refreshTrigger={refreshTrigger}
               onPositionClosed={handlePositionClosed}
             />
