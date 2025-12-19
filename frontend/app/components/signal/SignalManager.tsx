@@ -225,7 +225,7 @@ const TIME_WINDOWS = [
   { value: '30m', label: '30 min', desc: 'Longer-term trends' },
   { value: '1h', label: '1 hour', desc: 'Major trend changes only' },
 ]
-const SYMBOLS = ['BTC', 'ETH', 'SOL', 'DOGE', 'XRP', 'AVAX', 'LINK', 'ARB']
+// Symbols are now loaded dynamically from Hyperliquid watchlist (see watchlistSymbols state)
 
 export default function SignalManager() {
   const [signals, setSignals] = useState<SignalDefinition[]>([])
@@ -1381,16 +1381,20 @@ export default function SignalManager() {
             <div>
               <Label>Symbols</Label>
               <div className="flex flex-wrap gap-2 mt-2">
-                {SYMBOLS.map(symbol => (
-                  <Button
-                    key={symbol}
-                    variant={poolForm.symbols.includes(symbol) ? 'default' : 'outline'}
-                    size="sm"
-                    onClick={() => toggleSymbol(symbol)}
-                  >
-                    {symbol}
-                  </Button>
-                ))}
+                {watchlistSymbols.length > 0 ? (
+                  watchlistSymbols.map(symbol => (
+                    <Button
+                      key={symbol}
+                      variant={poolForm.symbols.includes(symbol) ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => toggleSymbol(symbol)}
+                    >
+                      {symbol}
+                    </Button>
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">No symbols in watchlist. Configure watchlist first.</p>
+                )}
               </div>
             </div>
             <div>

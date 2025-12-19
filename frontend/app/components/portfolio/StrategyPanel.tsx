@@ -194,6 +194,10 @@ export default function StrategyPanel({
 
   const handleSaveWatchlist = useCallback(async () => {
     resetWatchlistMessages()
+    if (watchlistSymbols.length < 1) {
+      setWatchlistError('At least one symbol must be selected.')
+      return
+    }
     try {
       setWatchlistSaving(true)
       const response = await updateHyperliquidWatchlist(watchlistSymbols)

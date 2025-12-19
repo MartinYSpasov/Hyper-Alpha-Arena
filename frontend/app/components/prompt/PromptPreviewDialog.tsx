@@ -36,7 +36,7 @@ export default function PromptPreviewDialog({
   templateText,
 }: PromptPreviewDialogProps) {
   const [accounts, setAccounts] = useState<TradingAccount[]>([])
-  const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([])
+  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null)
   const [previews, setPreviews] = useState<PromptPreviewItem[]>([])
   const [loading, setLoading] = useState(false)
   const [generating, setGenerating] = useState(false)
@@ -60,8 +60,8 @@ export default function PromptPreviewDialog({
       setAccounts(aiAccounts)
 
       // Auto-select first account if available
-      if (aiAccounts.length > 0 && selectedAccountIds.length === 0) {
-        setSelectedAccountIds([aiAccounts[0].id])
+      if (aiAccounts.length > 0 && selectedAccountId === null) {
+        setSelectedAccountId(aiAccounts[0].id)
       }
     } catch (err) {
       console.error(err)
@@ -84,15 +84,13 @@ export default function PromptPreviewDialog({
     }
   }
 
-  const handleAccountToggle = (accountId: number) => {
-    setSelectedAccountIds((prev) =>
-      prev.includes(accountId) ? prev.filter((id) => id !== accountId) : [...prev, accountId],
-    )
+  const handleAccountSelect = (accountId: number) => {
+    setSelectedAccountId(accountId)
   }
 
   const handleGeneratePreview = async () => {
-    if (selectedAccountIds.length === 0) {
-      toast.error('Please select at least one AI trader')
+    if (selectedAccountId === null) {
+      toast.error('Please select an AI trader')
       return
     }
 
@@ -101,7 +99,7 @@ export default function PromptPreviewDialog({
       const result = await previewPrompt({
         templateText: templateText,  // Use current editor content (preview before save)
         promptTemplateKey: templateKey,  // Fallback (for backward compatibility)
-        accountIds: selectedAccountIds,
+        accountIds: [selectedAccountId],
       })
       setPreviews(result.previews)
       toast.success(`Generated ${result.previews.length} preview(s)`)
@@ -146,10 +144,11 @@ export default function PromptPreviewDialog({
                   {accounts.map((account) => (
                     <div key={account.id} className="flex items-center space-x-2">
                       <input
-                        type="checkbox"
+                        type="radio"
+                        name="ai-trader-select"
                         id={`account-${account.id}`}
-                        checked={selectedAccountIds.includes(account.id)}
-                        onChange={() => handleAccountToggle(account.id)}
+                        checked={selectedAccountId === account.id}
+                        onChange={() => handleAccountSelect(account.id)}
                         className="w-4 h-4 cursor-pointer"
                       />
                       <label
@@ -198,7 +197,7 @@ export default function PromptPreviewDialog({
 
             <Button
               onClick={handleGeneratePreview}
-              disabled={generating || selectedAccountIds.length === 0}
+              disabled={generating || selectedAccountId === null}
               className="mt-4"
             >
               {generating ? 'Generating...' : 'Generate Preview'}

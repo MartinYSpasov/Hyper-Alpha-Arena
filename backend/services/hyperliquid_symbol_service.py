@@ -28,9 +28,6 @@ SYMBOL_REFRESH_TASK_ID = "hyperliquid_symbol_refresh"
 
 DEFAULT_SYMBOLS: List[Dict[str, str]] = [
     {"symbol": "BTC", "name": "Bitcoin"},
-    {"symbol": "ETH", "name": "Ethereum"},
-    {"symbol": "SOL", "name": "Solana"},
-    {"symbol": "DOGE", "name": "Dogecoin"},
 ]
 
 META_ENDPOINTS = {
