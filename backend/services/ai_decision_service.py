@@ -994,11 +994,81 @@ Regime Types:
                 market_regime_context[f"{symbol}_market_regime"] = market_regime_context.get(f"{symbol}_market_regime_5m", "N/A")
             market_regime_context["market_regime"] = market_regime_context.get("market_regime_5m", "N/A")
 
+            # ============================================================================
+            # Trigger Market Regime Variable
+            # ============================================================================
+            # {trigger_market_regime} - The market regime captured at signal trigger time.
+            # This is the regime that was calculated when the signal pool triggered,
+            # NOT the current real-time regime. Use this to ensure AI sees the same
+            # regime that caused the trigger.
+            #
+            # Only available for signal triggers (trigger_type = "signal").
+            # For scheduled triggers, this will be "N/A".
+            market_regime_context["trigger_market_regime"] = "N/A"
+
+            if trigger_context and trigger_context.get("trigger_type") == "signal":
+                signal_trigger_id = trigger_context.get("signal_trigger_id")
+                if signal_trigger_id:
+                    # Real trigger - fetch from database
+                    try:
+                        from sqlalchemy import text
+                        result = db.execute(
+                            text("SELECT market_regime FROM signal_trigger_logs WHERE id = :id"),
+                            {"id": signal_trigger_id}
+                        )
+                        row = result.fetchone()
+                        if row and row[0]:
+                            regime_json = row[0]
+                            # Parse JSON if it's a string
+                            if isinstance(regime_json, str):
+                                regime_data = json.loads(regime_json)
+                            else:
+                                regime_data = regime_json
+
+                            # Format to match other regime variables
+                            symbol = regime_data.get("symbol", "N/A")
+                            tf = regime_data.get("timeframe", "5m")
+                            regime = regime_data.get("regime", "unknown")
+                            direction = regime_data.get("direction", "neutral")
+                            conf = regime_data.get("confidence", 0)
+                            # Get indicators (backward compatible - old data may not have this)
+                            ind = regime_data.get("indicators", {})
+
+                            if ind:
+                                market_regime_context["trigger_market_regime"] = (
+                                    f"[{symbol}/{tf}] {regime} ({direction}) conf={conf:.2f} | "
+                                    f"cvd_ratio={ind.get('cvd_ratio', 0):.3f}, oi_delta={ind.get('oi_delta', 0):.3f}%, "
+                                    f"taker={ind.get('taker_ratio', 1):.2f}, rsi={ind.get('rsi', 50):.1f} | (trigger snapshot)"
+                                )
+                            else:
+                                # Old data without indicators
+                                market_regime_context["trigger_market_regime"] = (
+                                    f"[{symbol}/{tf}] {regime} ({direction}) conf={conf:.2f} | (trigger snapshot)"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Failed to get trigger market regime: {e}")
+                else:
+                    # Preview mode - no signal_trigger_id, provide sample value
+                    # Use trigger_symbol from context if available
+                    trigger_symbol = trigger_context.get("trigger_symbol", "BTC")
+                    # Get time_window from first triggered signal if available
+                    triggered_signals = trigger_context.get("triggered_signals", [])
+                    if triggered_signals:
+                        sample_tf = triggered_signals[0].get("time_window", "5m")
+                    else:
+                        sample_tf = "5m"
+                    market_regime_context["trigger_market_regime"] = (
+                        f"[{trigger_symbol}/{sample_tf}] breakout (bullish) conf=0.65 | "
+                        f"cvd_ratio=0.286, oi_delta=0.857%, taker=1.80, rsi=50.7 | (trigger snapshot - preview)"
+                    )
+
         except Exception as e:
             logger.warning(f"Failed to get market regime data: {e}")
             market_regime_context["market_regime"] = "N/A"
+            market_regime_context["trigger_market_regime"] = "N/A"
     else:
         market_regime_context["market_regime"] = "N/A"
+        market_regime_context["trigger_market_regime"] = "N/A"
 
     return {
         # Legacy variables (for Default prompt and backward compatibility)

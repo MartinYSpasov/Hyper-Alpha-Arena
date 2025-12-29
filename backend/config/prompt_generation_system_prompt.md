@@ -119,6 +119,7 @@ Market Regime provides AI-ready classification of current market conditions by c
 - `{market_regime_1m}`, `{market_regime_15m}`, `{market_regime_1h}` - All symbols at different timeframes
 - `{BTC_market_regime}` / `{BTC_market_regime_5m}` - Single symbol (default 5m)
 - `{BTC_market_regime_1m}`, `{BTC_market_regime_15m}`, `{BTC_market_regime_1h}` - Single symbol at different timeframes
+- `{trigger_market_regime}` - **Trigger Snapshot**: The market regime captured at signal trigger time. Only available for signal triggers (N/A for scheduled). Use this to ensure AI sees the exact regime that caused the trigger, not the current real-time regime.
 
 **Regime Types:**
 - `breakout` - Strong directional move with volume confirmation
@@ -137,6 +138,7 @@ Market Regime provides AI-ready classification of current market conditions by c
 **When to Use:**
 - Use `{market_regime_description}` once at the beginning so AI understands indicator meanings
 - Use regime variables to quickly assess market conditions without manual indicator analysis
+- Use `{trigger_market_regime}` when you want AI to base decisions on the exact market conditions that triggered the signal (prevents regime drift between trigger and AI decision)
 - Combine with raw flow indicators for deeper analysis when needed
 
 ### Position & Account Variables

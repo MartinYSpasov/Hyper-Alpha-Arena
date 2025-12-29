@@ -268,8 +268,14 @@ Market Regime variables provide AI-ready classification of current market condit
 | `{BTC_market_regime_5m}` | BTC regime (5-minute) |
 | `{BTC_market_regime_15m}` | BTC regime (15-minute) |
 | `{BTC_market_regime_1h}` | BTC regime (1-hour) |
+| `{trigger_market_regime}` | **Trigger Snapshot**: The market regime captured at signal trigger time. Only available for signal triggers (N/A for scheduled triggers). Use this to ensure AI sees the same regime that caused the trigger, not the current real-time regime. |
 
 Similar patterns available for ETH, SOL, and other supported symbols.
+
+**Important**: `{trigger_market_regime}` differs from real-time regime variables:
+- Real-time variables (`{BTC_market_regime_5m}`, etc.) are calculated at prompt generation time
+- `{trigger_market_regime}` is the regime snapshot from when the signal pool triggered
+- Use `{trigger_market_regime}` when you want AI decisions to be based on the exact market conditions that triggered the signal
 
 ### Regime Types
 

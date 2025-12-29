@@ -268,8 +268,14 @@ Imbalance last 5: +0.050, +0.080, +0.100, +0.130, +0.125
 | `{BTC_market_regime_5m}` | BTC状态（5分钟） |
 | `{BTC_market_regime_15m}` | BTC状态（15分钟） |
 | `{BTC_market_regime_1h}` | BTC状态（1小时） |
+| `{trigger_market_regime}` | **触发快照**：信号触发时捕获的市场状态。仅在信号触发时可用（定时触发时为N/A）。使用此变量确保AI看到的是触发信号时的市场状态，而非当前实时状态。 |
 
 ETH、SOL和其他支持的交易对也有类似模式。
+
+**重要说明**：`{trigger_market_regime}` 与实时状态变量的区别：
+- 实时变量（`{BTC_market_regime_5m}` 等）在提示词生成时计算
+- `{trigger_market_regime}` 是信号池触发时的状态快照
+- 当你希望AI决策基于触发信号时的确切市场条件时，使用 `{trigger_market_regime}`
 
 ### 状态类型
 

@@ -16,7 +16,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_market_regime_for_trigger(symbol: str, timeframe: str = "5m") -> Optional[str]:
-    """Get market regime classification for a trigger and return as JSON string."""
+    """Get market regime classification for a trigger and return as JSON string.
+
+    Args:
+        symbol: Trading symbol (e.g., "BTC")
+        timeframe: Time window for regime calculation (e.g., "5m", "15m", "1h")
+
+    Returns:
+        JSON string with regime, direction, confidence, reason, timeframe, and indicators
+    """
     try:
         from database.connection import SessionLocal
         from services.market_regime_service import get_market_regime
@@ -24,15 +32,18 @@ def _get_market_regime_for_trigger(symbol: str, timeframe: str = "5m") -> Option
         try:
             result = get_market_regime(db, symbol, timeframe)
             return json.dumps({
+                "symbol": symbol,
+                "timeframe": timeframe,
                 "regime": result.get("regime"),
                 "direction": result.get("direction"),
                 "confidence": result.get("confidence"),
                 "reason": result.get("reason"),
+                "indicators": result.get("indicators", {}),
             })
         finally:
             db.close()
     except Exception as e:
-        logger.warning(f"Failed to get market regime for {symbol}: {e}")
+        logger.warning(f"Failed to get market regime for {symbol}/{timeframe}: {e}")
         return None
 
 
@@ -563,8 +574,12 @@ class SignalDetectionService:
         """Log pool trigger to database and return the trigger_log_id."""
         try:
             import json
+            from collections import Counter
             from database.connection import SessionLocal
             from sqlalchemy import text
+
+            # Timeframe order for tie-breaking (smaller = more granular = preferred)
+            TIMEFRAME_ORDER = {"1m": 1, "5m": 2, "15m": 3, "30m": 4, "1h": 5, "4h": 6, "1d": 7}
 
             db = SessionLocal()
             try:
@@ -596,8 +611,27 @@ class SignalDetectionService:
                     ],
                 })
 
-                # Get market regime for this trigger
-                market_regime = _get_market_regime_for_trigger(trigger_result["symbol"])
+                # Determine the most common time_window from triggered signals
+                time_windows = [
+                    s.get("time_window", "5m")
+                    for s in trigger_result["signals_triggered"]
+                ]
+                if time_windows:
+                    # Count occurrences of each time_window
+                    tw_counts = Counter(time_windows)
+                    max_count = max(tw_counts.values())
+                    # Get all time_windows with max count (handle ties)
+                    candidates = [tw for tw, count in tw_counts.items() if count == max_count]
+                    # On tie, prefer smaller (more granular) timeframe
+                    trigger_timeframe = min(candidates, key=lambda x: TIMEFRAME_ORDER.get(x, 99))
+                else:
+                    logger.warning("No time_window found in triggered signals, using default 5m")
+                    trigger_timeframe = "5m"
+
+                # Get market regime for this trigger using the determined timeframe
+                market_regime = _get_market_regime_for_trigger(
+                    trigger_result["symbol"], trigger_timeframe
+                )
 
                 # Insert and return the new trigger_log_id
                 result = db.execute(
@@ -622,7 +656,8 @@ class SignalDetectionService:
                 ])
                 logger.info(
                     f"Pool triggered: {trigger_result['pool_name']} ({trigger_result['logic']}) "
-                    f"on {trigger_result['symbol']} - signals: [{signals_info}] (trigger_log_id={trigger_log_id})"
+                    f"on {trigger_result['symbol']} - signals: [{signals_info}] "
+                    f"(trigger_log_id={trigger_log_id}, regime_tf={trigger_timeframe})"
                 )
                 return trigger_log_id
             finally:
