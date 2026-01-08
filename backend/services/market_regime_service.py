@@ -236,9 +236,9 @@ def classify_regime(
     if is_cvd_strong and is_oi_decrease and rsi_extreme:
         return REGIME_EXHAUSTION, "Trend exhaustion at RSI extreme"
 
-    # 4. Trap: strong CVD + OI decrease significantly
-    if is_cvd_strong and is_oi_decrease:
-        return REGIME_TRAP, "Strong flow but positions closing (trap)"
+    # 4. Trap: strong CVD + OI decrease + price reversal (close near open)
+    if is_cvd_strong and is_oi_decrease and abs(price_atr) < config.stop_hunt_close_atr:
+        return REGIME_TRAP, "Strong flow but positions closing with reversal (trap)"
 
     # 5. Absorption: strong CVD but price doesn't move
     is_price_move = abs(price_atr) > price_move

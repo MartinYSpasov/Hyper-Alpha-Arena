@@ -324,7 +324,9 @@ export default function MarketRegimeConfig() {
               <span className="text-foreground">CVD strong</span>
               <And />
               <span className="text-foreground">OI Delta &lt; {config.trap_oi_z}</span>
-              <span className="text-muted-foreground text-xs">(from Exhaustion)</span>
+              <And />
+              <span className="text-foreground">Close Offset &lt; {config.stop_hunt_close_atr}</span>
+              <span className="text-muted-foreground text-xs">(reuse Stop Hunt)</span>
             </DecisionNode>
 
             {/* 5. Absorption */}
