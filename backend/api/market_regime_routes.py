@@ -107,7 +107,9 @@ async def get_regime_for_symbol(
 ):
     """Get market regime classification for a single symbol"""
     try:
-        result = get_market_regime(db, symbol, timeframe, config_id, timestamp_ms)
+        # Always use realtime mode (flow data aggregation) for consistent results
+        # This ensures backtest/preview results match real-time trigger calculations
+        result = get_market_regime(db, symbol, timeframe, config_id, timestamp_ms, use_realtime=True)
         return MarketRegimeResponse(
             symbol=symbol,
             regime=result["regime"],
@@ -135,8 +137,9 @@ async def get_regime_batch(
 
     for symbol in request.symbols:
         try:
+            # Always use realtime mode (flow data aggregation) for consistent results
             result = get_market_regime(
-                db, symbol, request.timeframe, request.config_id, request.timestamp_ms
+                db, symbol, request.timeframe, request.config_id, request.timestamp_ms, use_realtime=True
             )
             results.append(MarketRegimeResponse(
                 symbol=symbol,
